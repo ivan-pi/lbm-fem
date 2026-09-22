@@ -199,7 +199,7 @@ vortex positive, as in Table I of Lee & Lin):
 ## Build and run
 
     cmake -S . -B build -DDEAL_II_DIR=/path/to/dealii     # deal.II >= 9.5, MPI + p4est
-                                                          # -DCGDBE_DEGREE=2 for Q2 elements
+                                                          # -DLBFEM_DEGREE=2 for Q2 elements
     cmake --build build && cd build
 
     ./cgdbe                                               # tgv, 64^2, Re = 100, bardow, CG mass
@@ -236,7 +236,7 @@ CI (`.github/workflows/ci.yml`) builds in the `dealii/dealii` Docker image, runs
 a coarse cavity to steady state, checks $`\psi_{max}`$ against Ghia, Ghia & Shin (1982)
 and uploads the streamline plot as a build artifact.
 
-The benchmarks and the tools are built with `-DCGDBE_BUILD_EXTRAS=ON`; the
+The benchmarks and the tools are built with `-DLBFEM_BUILD_EXTRAS=ON`; the
 benchmarks need only a C++ compiler (`g++ -O3 -march=native benchmarks/roofline.cc`).
 The cavity reference results are plotted from the repository root with
 
@@ -722,7 +722,7 @@ the right-hand side consists of very few eigenvectors of $`M`$.
 
 ### Higher-order elements
 
-`fe_degree` is a compile-time constant (`-DCGDBE_DEGREE=p`); nothing else
+`fe_degree` is a compile-time constant (`-DLBFEM_DEGREE=p`); nothing else
 changes: `FE_Q(p)` has Gauss–Lobatto nodes, the kernels use $`p + 1`$ Gauss points,
 wall nodes are found by coordinate, and $`\Delta t = c h_{min} / p^2`$ with
 $`c`$ = `--cfl`. Taylor–Green, `bardow`, $`Ma = 0.02`$, $`Re = 100`$,

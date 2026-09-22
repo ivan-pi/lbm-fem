@@ -24,41 +24,42 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Polynomial degree of the FE_Q elements (compile-time constant of the kernels).
-set(CGDBE_DEGREE 1 CACHE STRING "Polynomial degree of the elements")
+set(LBFEM_DEGREE 1 CACHE STRING "Polynomial degree of the elements")
 
 # The matrix-free kernels are header templates that are compiled with each
 # driver, so they benefit from native tuning. The SIMD width of VectorizedArray,
 # however, is fixed by how deal.II itself was configured.
-option(CGDBE_NATIVE "Compile with -O3 -march=native" ON)
+option(LBFEM_NATIVE "Compile with -O3 -march=native" ON)
 
 # A driver: an executable built on deal.II and the header-only lbfem library
-# (include/lbfem). Its sources see CGDBE_DEGREE as a compile definition.
+# (include/lbfem). Its sources see LBFEM_DEGREE as a compile definition.
 # (Include directories rather than target_link_libraries, whose plain and
 # keyword forms deal_ii_setup_target does not mix with.)
 function(lbfem_add_driver name)
   add_executable(${name} ${ARGN})
   deal_ii_setup_target(${name})
   target_include_directories(${name} PRIVATE ${PROJECT_SOURCE_DIR}/include)
-  target_compile_definitions(${name} PRIVATE CGDBE_DEGREE=${CGDBE_DEGREE})
-  if(CGDBE_NATIVE)
+  target_compile_definitions(${name} PRIVATE LBFEM_DEGREE=${LBFEM_DEGREE})
+  if(LBFEM_NATIVE)
     target_compile_options(${name} PRIVATE $<$<CONFIG:Release>:-O3 -march=native>)
   endif()
 endfunction()
 
 lbfem_add_driver(cgdbe apps/cgdbe/cgdbe.cc)
 
-# Optional helpers: stand-alone micro-benchmarks (plain C++, always tuned for
-# the build machine, whose peak they measure) and the deal.II element-matrix
-# check that is compared against analysis/stencils.py.
-option(CGDBE_BUILD_EXTRAS "Build benchmarks/ and tools/" OFF)
-if(CGDBE_BUILD_EXTRAS)
-  foreach(bench roofline stencil_bench collision_simd)
+# Optional helpers: plain C++ micro-benchmarks (always tuned for the build
+# machine, whose peak they measure), the deal.II element-matrix check that is
+# compared against analysis/stencils.py, and two studies built on lbfem: the
+# mass-matrix preconditioners and a vectorized collision.
+option(LBFEM_BUILD_EXTRAS "Build benchmarks/ and tools/" OFF)
+if(LBFEM_BUILD_EXTRAS)
+  foreach(bench roofline stencil_bench)
     add_executable(${bench} benchmarks/${bench}.cc)
     target_compile_options(${bench} PRIVATE -O3 -march=native)
   endforeach()
-  target_include_directories(collision_simd PRIVATE ${PROJECT_SOURCE_DIR}/include)
-  target_compile_options(collision_simd PRIVATE -fopenmp-simd)
   add_executable(elem tools/elem.cc)
   deal_ii_setup_target(elem)
   lbfem_add_driver(mass_preconditioners tools/mass_preconditioners.cc)
+  lbfem_add_driver(collision_simd benchmarks/collision_simd.cc)
+  target_compile_options(collision_simd PRIVATE -fopenmp-simd)
 endif()

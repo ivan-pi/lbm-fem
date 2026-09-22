@@ -44,25 +44,24 @@ namespace lbfem
   using BlockVectorType = LinearAlgebra::distributed::BlockVector<Number>;
   using Direction       = std::array<double, 2>;
 
-  template <int fe_degree_>
+  struct MeshSettings
+  {
+    unsigned int refinements     = 6;     // 2^n x 2^n elements ...
+    unsigned int n_cells         = 0;     // ... or, if > 0, n_cells x n_cells elements
+    bool         stream_function = false; // set up DoF index 1 with psi = 0 on the boundary
+  };
+
+  template <int fe_degree>
   struct Discretization
   {
-    static constexpr int dim       = 2;
-    static constexpr int fe_degree = fe_degree_;
-    static constexpr int n_q_1d    = fe_degree + 1;
+    static constexpr int dim    = 2;
+    static constexpr int n_q_1d = fe_degree + 1;
 
     using MassOperator = MatrixFreeOperators::MassOperator<dim, fe_degree, n_q_1d, 1, VectorType>;
-
-    struct Settings
-    {
-      unsigned int refinements     = 6;     // 2^n x 2^n elements ...
-      unsigned int n_cells         = 0;     // ... or, if > 0, n_cells x n_cells elements
-      bool         stream_function = false; // set up DoF index 1 with psi = 0 on the boundary
-    };
+    using Settings     = MeshSettings;
 
     explicit Discretization(const MPI_Comm comm)
-      : comm(comm)
-      , triangulation(comm)
+      : triangulation(comm)
       , fe(fe_degree)
       , dof_handler(triangulation)
     {}
@@ -155,6 +154,14 @@ namespace lbfem
       v.collect_sizes();
     }
 
+    // The time step for a Courant number cfl = dt |e_x| / h_min on Q1; for Q_p
+    // it is reduced by p^2.
+    double
+    time_step(const double cfl) const
+    {
+      return cfl * h_min / (fe_degree * fe_degree);
+    }
+
     unsigned int
     n_nodes() const // locally owned
     {
@@ -172,7 +179,6 @@ namespace lbfem
       return {{n_type[GT::cartesian], n_type[GT::affine], n_type[GT::general]}};
     }
 
-    const MPI_Comm                            comm;
     parallel::distributed::Triangulation<dim> triangulation;
     const FE_Q<dim>                           fe;
     const MappingQ1<dim>                      mapping;

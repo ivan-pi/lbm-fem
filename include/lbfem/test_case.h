@@ -11,6 +11,7 @@
 #include <lbfem/d2q9.h>
 
 #include <array>
+#include <cmath>
 #include <string>
 
 namespace lbfem
@@ -20,6 +21,25 @@ namespace lbfem
   struct TestCase
   {
     double L = 1., U0 = 0., nu = 0., rho0 = 1.; // set by the driver
+
+    // Lattice units (|e_x| = 1, c_s^2 = 1/3): the velocity scale from the Mach
+    // number U0 / c_s, the viscosity from the Reynolds number U0 L / nu, and
+    // the relaxation time lambda = nu / c_s^2.
+    void
+    set_mach(const double mach)
+    {
+      U0 = mach * std::sqrt(D2Q9::cs2);
+    }
+    void
+    set_reynolds(const double Re)
+    {
+      nu = U0 * L / Re;
+    }
+    double
+    relaxation_time() const
+    {
+      return nu / D2Q9::cs2;
+    }
 
     virtual ~TestCase() = default;
     virtual std::string
@@ -32,9 +52,14 @@ namespace lbfem
     transform_mesh(Triangulation<2> &, double &) const
     {}
     virtual int
-    wall_of(const Point<2> &) const // -1 interior, 0 stationary wall, 1 moving lid
+    wall_of(const Point<2> &) const // -1 interior, else a wall index < n_walls()
     {
       return -1;
+    }
+    virtual unsigned int
+    n_walls() const // by default 0 a stationary wall, 1 a moving lid
+    {
+      return 2;
     }
     virtual std::array<double, 2>
     wall_velocity(const int wall) const

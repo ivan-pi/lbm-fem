@@ -49,6 +49,14 @@ namespace lbfem
     const BlockVectorType *feq = nullptr;
   };
 
+  // Work per node and time step, for a performance model: vector passes (a
+  // single-pass traffic model, no cache reuse) and flops (a multiply-add
+  // counts 2).
+  struct Work
+  {
+    double vector_passes = 0., flops = 0.;
+  };
+
   template <int fe_degree>
   class AdvectionOperator
   {
@@ -59,6 +67,18 @@ namespace lbfem
     // population streamed along e[alpha].
     virtual void
     apply(BlockVectorType &rhs, const AdvectionInput &in, const Directions &e, const TimeStep &ts) const = 0;
+
+    // The work of one apply() per node; unknown (zero) unless overridden.
+    virtual Work
+    work(const double /*cells_per_node*/) const
+    {
+      return {};
+    }
+
+  protected:
+    // Arithmetic of the Q1 Taylor-Galerkin kernel per cell and population
+    // (cartesian cells: gradients 72, quadrature 24, integration 88; see README).
+    static constexpr double flops_per_cell = 184. * (fe_degree == 1 ? 1. : 3.5 * fe_degree);
   };
 
 
@@ -91,28 +111,9 @@ namespace lbfem
       Fluxes flux;
     };
 
-    template <std::size_t>
-    using GradientsOf = Fluxes; // one set of gradients per source field
-
-    // A point operation for n_sources fields is called as op(e, grad...), with
+    // A point operation for n source fields is called as op(e, grad...) with
     // the directions of all populations and the gradients of all moving
-    // populations in each field.
-    template <typename Op, typename Sequence>
-    struct PointCall : std::false_type
-    {};
-    template <typename Op, std::size_t... s>
-    struct PointCall<Op, std::index_sequence<s...>>
-      : std::is_invocable<const Op &, const Directions &, const GradientsOf<s> &...>
-    {
-      using result = std::invoke_result_t<const Op &, const Directions &, const GradientsOf<s> &...>;
-    };
-
-    template <typename Op, std::size_t n_sources>
-    using PointResult = typename PointCall<Op, std::make_index_sequence<n_sources>>::result;
-
-    template <typename Op, std::size_t n_sources>
-    concept PointOperation = PointCall<Op, std::make_index_sequence<n_sources>>::value &&
-                             (HasValue<PointResult<Op, n_sources>> || HasFlux<PointResult<Op, n_sources>>);
+    // populations in each field, and returns their terms (HasValue, HasFlux).
 
     // A boundary operation: op(e, normal, grad) with the directions of all
     // populations, the outward normal and the gradients of all moving
@@ -135,9 +136,10 @@ namespace lbfem
                     std::index_sequence<s...>)
     {
       using FEEval = FEEvaluation<2, fe_degree, fe_degree + 1, n_moving, Number>;
-      using Terms  = PointResult<Op, sizeof...(s)>;
-
       std::array<FEEval, sizeof...(s)> phi{{((void)s, FEEval(data))...}};
+
+      using Terms = decltype(op(e, phi[s].get_gradient(0)...));
+      static_assert(HasValue<Terms> || HasFlux<Terms>, "a point operation returns a value or a flux term");
       for (unsigned int cell = range.first; cell < range.second; ++cell)
         {
           for (auto &phi_s : phi)
@@ -187,7 +189,7 @@ namespace lbfem
     // rhs <- cell integrals of cell_op + wall integrals of face_op, in one
     // matrix-free loop over src[0] (the populations; ghost values of the other
     // sources are exchanged here).
-    template <int fe_degree, std::size_t n_sources, PointOperation<n_sources> CellOp, BoundaryOperation FaceOp>
+    template <int fe_degree, std::size_t n_sources, typename CellOp, BoundaryOperation FaceOp>
     void
     advection_loop(const MatrixFree<2, Number>                         &mf,
                    BlockVectorType                                     &rhs,
@@ -282,6 +284,13 @@ namespace lbfem
         wall_surface_term(ts.dt, remove_wall_mass_flux));
     }
 
+    // Reads g (8) and writes rhs (8); the face loop re-reads a boundary layer only.
+    Work
+    work(const double cells_per_node) const override
+    {
+      return {16, this->flops_per_cell * n_moving * cells_per_node * 1.};
+    }
+
   private:
     const Discretization<fe_degree> &disc;
     const bool                       remove_wall_mass_flux;
@@ -330,6 +339,13 @@ namespace lbfem
           return t;
         },
         wall_surface_term(ts.dt, /*remove_mass_flux*/ false));
+    }
+
+    // Reads f and feq (8 + 8) and writes rhs (8); gradients of two fields.
+    Work
+    work(const double cells_per_node) const override
+    {
+      return {24, this->flops_per_cell * n_moving * cells_per_node * 1.4};
     }
 
   private:

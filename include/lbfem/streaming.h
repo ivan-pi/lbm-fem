@@ -23,18 +23,19 @@ namespace lbfem
     tg3_split // TG3 as an x sweep followed by a y sweep (exact at CFL 1 on a lattice)
   };
 
+  struct StreamingSettings
+  {
+    Streaming    streaming = Streaming::tg2;
+    MassSettings mass;
+  };
+
   template <int fe_degree>
   class TaylorGalerkin
   {
   public:
     using Disc               = Discretization<fe_degree>;
+    using Settings           = StreamingSettings;
     static constexpr int dim = Disc::dim;
-
-    struct Settings
-    {
-      Streaming                                streaming = Streaming::tg2;
-      typename MassSolver<fe_degree>::Settings mass;
-    };
 
     TaylorGalerkin(const Disc                                  &disc,
                    const Settings                              &settings,
@@ -59,12 +60,13 @@ namespace lbfem
       ts = time_step;
     }
 
-    // incr <- A^{-1} r(in) for all moving populations.
-    void
+    // The increments A^{-1} r(in) of all moving populations (Q-1 blocks).
+    const BlockVectorType &
     compute_increment(const AdvectionInput &in)
     {
       assemble_rhs(in);
       apply_mass_inverse(incr);
+      return incr;
     }
 
     // f_alpha += A^{-1} r(f)_alpha for the moving populations (collide, then
@@ -100,10 +102,17 @@ namespace lbfem
       stream_e = D2Q9::e;
     }
 
-    const Settings &
-    get_settings() const
+    // The work counters of the mass solves (for a performance model).
+    const MassSolver<fe_degree> &
+    mass_solver() const
     {
-      return settings;
+      return mass;
+    }
+
+    const AdvectionOperator<fe_degree> &
+    advection_operator() const
+    {
+      return *advection;
     }
 
   private:
@@ -145,11 +154,9 @@ namespace lbfem
     StageTimers                                  &timers;
     TimeStep                                      ts{0., 0.};
     Directions                                    stream_e = D2Q9::e; // directions of the current sweep
-    BlockVectorType                               rhs;       // r_alpha              (Q-1 blocks)
+    BlockVectorType                               rhs;       // r_alpha                      (Q-1 blocks)
+    BlockVectorType                               incr;      // (A^{-1} r)_alpha              (Q-1 blocks)
     BlockVectorType                               incr_prev; // previous incr (CG warm start) / second sweep
-
-  public:
-    MassSolver<fe_degree> mass;
-    BlockVectorType       incr; // (A^{-1} r)_alpha of the last compute_increment (Q-1 blocks)
+    MassSolver<fe_degree>                         mass;
   };
 } // namespace lbfem

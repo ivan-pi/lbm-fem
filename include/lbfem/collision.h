@@ -110,7 +110,9 @@ namespace lbfem
       of_node.resize(node.size());
       for (unsigned int i = 0; i < node.size(); ++i)
         of_node[i] = tc.wall_of(node[i]);
-      velocity = {tc.wall_velocity(0), tc.wall_velocity(1)};
+      velocity.resize(tc.n_walls());
+      for (unsigned int w = 0; w < velocity.size(); ++w)
+        velocity[w] = tc.wall_velocity(w);
     }
 
     // Moments of node i, with the wall velocity on wall nodes.

@@ -34,7 +34,7 @@ namespace lbfem
   public:
     using Disc      = Discretization<fe_degree>;
     using Advection = std::unique_ptr<AdvectionOperator<fe_degree>>;
-    using Settings  = typename TaylorGalerkin<fe_degree>::Settings;
+    using Settings  = StreamingSettings;
 
     virtual ~Scheme() = default;
 
@@ -54,6 +54,10 @@ namespace lbfem
     // f, 1 + dt/(2 lambda) for the transformed g.
     virtual Number
     neq_scale() const = 0;
+
+    // The nodal (collision) work per node and time step (see advection.h).
+    virtual Work
+    collision_work() const = 0;
 
     // Initial populations of the test case at every locally owned node.
     void
@@ -94,11 +98,11 @@ namespace lbfem
     // TG2 streaming; by default with the advection of Lee & Lin, which keeps
     // the wall surface term as it is. A custom advection receives the
     // equilibria in AdvectionInput::feq.
-    LeeLin(const typename Base::Disc                      &disc,
-           const Walls                                    &walls,
-           const typename MassSolver<fe_degree>::Settings &mass,
-           StageTimers                                    &timers,
-           typename Base::Advection                        advection = nullptr)
+    LeeLin(const typename Base::Disc &disc,
+           const Walls               &walls,
+           const MassSettings        &mass,
+           StageTimers               &timers,
+           typename Base::Advection   advection = nullptr)
       : Base(disc,
              walls,
              {.streaming = Streaming::tg2, .mass = mass},
@@ -112,9 +116,9 @@ namespace lbfem
     step() override
     {
       this->timers.time(StageTimers::collision, [&] { compute_equilibrium(this->f, feq, this->walls); });
-      this->streaming.compute_increment({.f = this->f, .feq = &feq});
+      const auto &incr = this->streaming.compute_increment({.f = this->f, .feq = &feq});
       this->timers.time(StageTimers::collision, [&] {
-        predictor_corrector(this->f, feq, Moving{this->streaming.incr}, this->walls, this->ts.dt / this->ts.lambda);
+        predictor_corrector(this->f, feq, Moving{incr}, this->walls, this->ts.dt / this->ts.lambda);
       });
     }
 
@@ -122,6 +126,14 @@ namespace lbfem
     neq_scale() const override
     {
       return 1.;
+    }
+
+    // Reads f (9), writes feq (9), then reads f, feq, incr (9+9+8) and writes f
+    // (9); equilibrium 122, predictor 32, equilibrium of fhat 122, corrector 27.
+    Work
+    collision_work() const override
+    {
+      return {18 + 35, 303};
     }
 
   private:
@@ -163,6 +175,14 @@ namespace lbfem
     neq_scale() const override
     {
       return 1. + 0.5 * this->ts.dt / this->ts.lambda;
+    }
+
+    // Reads and writes g (9+9) and adds incr to g (8+8 read, 8 write); moments
+    // 20, equilibrium 102, relaxation 18, increment 8.
+    Work
+    collision_work() const override
+    {
+      return {18 + 24, 148};
     }
   };
 } // namespace lbfem

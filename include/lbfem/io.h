@@ -74,10 +74,16 @@ namespace lbfem
   // Raw dump of the locally owned populations, one file per rank. Valid for the
   // same mesh and number of ranks; transformed populations (Bardow) also assume
   // the same dt.
+  inline std::string
+  checkpoint_file(const std::string &name, const MPI_Comm comm)
+  {
+    return name + "." + std::to_string(Utilities::MPI::this_mpi_process(comm));
+  }
+
   inline void
   write_checkpoint(const BlockVectorType &f, const std::string &name, const MPI_Comm comm)
   {
-    const std::string file  = name + "." + std::to_string(Utilities::MPI::this_mpi_process(comm));
+    const std::string file  = checkpoint_file(name, comm);
     const std::size_t bytes = f.block(0).locally_owned_size() * sizeof(Number);
     std::ofstream     out(file + ".tmp", std::ios::binary);
     for (unsigned int b = 0; b < f.n_blocks(); ++b)
@@ -89,7 +95,7 @@ namespace lbfem
   inline void
   read_checkpoint(BlockVectorType &f, const std::string &name, const MPI_Comm comm)
   {
-    const std::string file  = name + "." + std::to_string(Utilities::MPI::this_mpi_process(comm));
+    const std::string file  = checkpoint_file(name, comm);
     const std::size_t bytes = f.block(0).locally_owned_size() * sizeof(Number);
     std::ifstream     in(file, std::ios::binary);
     for (unsigned int b = 0; b < f.n_blocks(); ++b)

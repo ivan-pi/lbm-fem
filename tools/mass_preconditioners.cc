@@ -14,8 +14,6 @@
 #include <deal.II/lac/solver_cg.h>
 #include <deal.II/lac/solver_control.h>
 
-#include <deal.II/matrix_free/tools.h>
-
 #include <lbfem/advection.h>
 #include <lbfem/discretization.h>
 #include <lbfem/mass.h>
@@ -24,7 +22,6 @@
 #include <lbfem/timers.h>
 
 #include <cstdio>
-#include <functional>
 #include <memory>
 #include <random>
 #include <string>
@@ -34,9 +31,9 @@
 using namespace dealii;
 using namespace lbfem;
 
-constexpr int p = CGDBE_DEGREE;
+constexpr int p = LBFEM_DEGREE;
 using Disc      = Discretization<p>;
-using TG3LHS    = TG3Operator<2, p, p + 1, Number>;
+using TG3LHS    = TG3Operator<p>;
 using Jacobi    = DiagonalMatrix<VectorType>;
 
 // Counts the applications of an operator. Chebyshev keeps a pointer to it
@@ -98,19 +95,21 @@ solve(const Counted<Operator> &A, const Preconditioner &P, const VectorType &b)
 }
 
 // Chebyshev polynomial of degree k in Jacobi-preconditioned A over the whole
-// spectrum, as a fixed linear preconditioner (k applications of A).
+// spectrum, as a fixed linear preconditioner. Its eigenvalue estimate (a CG
+// run) is done here, so that the timed solves do not include it.
 template <typename Operator>
 auto
-chebyshev(const Operator &A, const Disc &disc, const unsigned int k)
+chebyshev(const Operator &A, const Disc &disc, const unsigned int k, const VectorType &b)
 {
   using Cheb = PreconditionChebyshev<Operator, VectorType, Jacobi>;
   typename Cheb::AdditionalData data;
   data.degree              = k;
   data.smoothing_range     = 12.; // lambda_min = lambda_max / 12, below the spectrum
   data.eig_cg_n_iterations = 30;
-  data.preconditioner      = std::make_shared<Jacobi>(*disc.mass.get_matrix_diagonal_inverse());
+  data.preconditioner      = disc.mass.get_matrix_diagonal_inverse();
   auto P                   = std::make_shared<Cheb>();
   P->initialize(A, data);
+  P->estimate_eigenvalues(b);
   return P;
 }
 
@@ -119,7 +118,7 @@ study(const std::string &label, TestCase &tc, const unsigned int refinements)
 {
   Disc disc(MPI_COMM_WORLD);
   disc.reinit({.refinements = refinements}, tc);
-  const Number dt = disc.h_min / (p * p); // CFL 1 (TG3's limit)
+  const Number dt = disc.time_step(1.); // CFL 1 (TG3's limit)
 
   // --- right-hand sides: random, and the advection of a running simulation
   VectorType random;
@@ -133,40 +132,24 @@ study(const std::string &label, TestCase &tc, const unsigned int refinements)
   TimerOutput timer_output(MPI_COMM_WORLD, std::cout, TimerOutput::never, TimerOutput::wall_times);
   StageTimers timers(timer_output);
   Walls       walls;
-  tc.U0 = 0.1 * std::sqrt(D2Q9::cs2);
-  tc.nu = tc.U0 * tc.L / 400.;
+  tc.set_mach(0.1);
+  tc.set_reynolds(400.);
   walls.reinit(disc.node, tc);
   Bardow<p> scheme(disc, walls, {.streaming = Streaming::tg2, .mass = {.type = Mass::lumped}}, timers);
-  scheme.set_time_step({.dt = 0.4 * disc.h_min / (p * p), .lambda = tc.nu / D2Q9::cs2});
+  scheme.set_time_step({.dt = disc.time_step(0.4), .lambda = tc.relaxation_time()});
   scheme.set_initial_populations(tc);
   for (unsigned int n = 0; n < 50; ++n)
     scheme.step();
   BlockVectorType rhs;
   disc.initialize(rhs, n_moving);
-  TaylorGalerkinAdvection<p>(disc, true).apply(rhs, {.f = scheme.f}, D2Q9::e, {.dt = dt, .lambda = tc.nu / D2Q9::cs2});
+  TaylorGalerkinAdvection<p>(disc, true).apply(rhs, {.f = scheme.f}, D2Q9::e, {.dt = dt, .lambda = tc.relaxation_time()});
   const VectorType &advection = rhs.block(1); // population 2, e = (1, 1)
 
   const TG3LHS tg3(*disc.matrix_free, dt * dt / 6., {{1., 1.}});
 
-  // the diagonal of the TG3 operator itself (the code preconditions with diag(M))
+  // the diagonal of the TG3 operator itself (the solver preconditions with diag(M))
   VectorType tg3_diagonal;
-  disc.matrix_free->initialize_dof_vector(tg3_diagonal);
-  const Number coef = dt * dt / 6.;
-  MatrixFreeTools::compute_diagonal<2, p, p + 1, 1, Number, VectorizedArray<Number>, VectorType>(
-    *disc.matrix_free, tg3_diagonal, [&](FEEvaluation<2, p, p + 1, 1, Number> &phi) {
-      phi.evaluate(EvaluationFlags::values | EvaluationFlags::gradients);
-      for (unsigned int q = 0; q < phi.n_q_points; ++q)
-        {
-          const auto g  = phi.get_gradient(q);
-          const auto eg = g[0] + g[1]; // e = (1, 1)
-          Tensor<1, 2, VectorizedArray<Number>> flux;
-          flux[0] = coef * eg;
-          flux[1] = coef * eg;
-          phi.submit_value(phi.get_value(q), q);
-          phi.submit_gradient(flux, q);
-        }
-      phi.integrate(EvaluationFlags::values | EvaluationFlags::gradients);
-    });
+  tg3.compute_diagonal(tg3_diagonal);
   for (auto &d : tg3_diagonal)
     d = d > 0. ? 1. / d : 1.;
   const Jacobi tg3_jacobi(tg3_diagonal);
@@ -193,7 +176,7 @@ study(const std::string &label, TestCase &tc, const unsigned int refinements)
       row(op, "Jacobi, own diagonal", counted, tg3_jacobi);
     for (const unsigned int k : {2u, 3u, 5u})
       {
-        const auto P = chebyshev(counted, disc, k); // estimates its eigenvalues here
+        const auto P = chebyshev(counted, disc, k, random);
         row(op, "Chebyshev(J) k=" + std::to_string(k), counted, *P);
       }
   };

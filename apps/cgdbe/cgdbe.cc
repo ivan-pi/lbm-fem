@@ -53,8 +53,8 @@
 using namespace dealii;
 using namespace lbfem;
 
-#ifndef CGDBE_DEGREE
-#  define CGDBE_DEGREE 1 // polynomial degree of the FE_Q elements (cmake -DCGDBE_DEGREE=p)
+#ifndef LBFEM_DEGREE
+#  define LBFEM_DEGREE 1 // polynomial degree of the FE_Q elements (cmake -DLBFEM_DEGREE=p)
 #endif
 
 // -------------------------------- parameters ---------------------------------
@@ -76,12 +76,10 @@ struct Parameters
 {
   Case         test_case  = Case::tgv;
   SchemeType   scheme     = SchemeType::bardow;
-  Mass         mass       = Mass::cg;
-  unsigned int richardson = 2;              // passes for Mass::richardson
-  Streaming    streaming  = Streaming::tg2; // bardow only
+  MassSettings mass;                       // type, Richardson passes, CG tolerance
+  Streaming    streaming = Streaming::tg2; // bardow only
+  MeshSettings mesh;                       // refinements or cells per direction
 
-  unsigned int refinements = 6;   // 2^n x 2^n elements ...
-  unsigned int n_cells     = 0;   // ... or, if > 0, n_cells x n_cells elements
   double       mach        = 0.1; // U0 / c_s
   unsigned int modes[2]    = {1, 4};  // tgv: wave numbers k_i = 2 pi n_i / L
   std::vector<double> reynolds;       // U0 L / nu (default 100 | 10 | 400); cavity: a list
@@ -93,7 +91,6 @@ struct Parameters
   double       distort    = 0.;    // tgv: mesh distortion x += eps sin(2 pi x) sin(2 pi y)
   double       steady_tol = 1e-4;  // cavity: stop if mean |du|/U0 per t_ref < tol
   unsigned int max_steps  = 0;     // > 0: fixed number of steps (benchmark)
-  double       cg_tolerance = 1e-8; // relative to |rhs|
   unsigned int n_diagnostic = 20;   // diagnostic lines over the run
   bool         output       = true; // write the .dat files
   std::string  checkpoint;          // write populations here (per rank) at every diagnostic
@@ -135,17 +132,17 @@ options()
      [](auto &p, const auto &v) {
        if (v.starts_with("richardson"))
          {
-           p.mass = Mass::richardson;
+           p.mass.type = Mass::richardson;
            if (v.size() > 10)
-             p.richardson = std::stoul(v.substr(10));
+             p.mass.richardson = std::stoul(v.substr(10));
          }
        else
-         p.mass = choose<Mass>("--mass", v, {"cg", "lumped"});
+         p.mass.type = choose<Mass>("--mass", v, {"cg", "lumped"});
      }},
     {"--streaming", "tg2|tg3|tg3-split",
      [](auto &p, const auto &v) { p.streaming = choose<Streaming>("--streaming", v, {"tg2", "tg3", "tg3-split"}); }},
-    {"--refine", "n", [](auto &p, const auto &v) { p.refinements = std::stoul(v); }},
-    {"--cells", "N", [](auto &p, const auto &v) { p.n_cells = std::stoul(v); }},
+    {"--refine", "n", [](auto &p, const auto &v) { p.mesh.refinements = std::stoul(v); }},
+    {"--cells", "N", [](auto &p, const auto &v) { p.mesh.n_cells = std::stoul(v); }},
     {"--mach", "Ma", [](auto &p, const auto &v) { p.mach = std::stod(v); }},
     {"--modes", "n1,n2",
      [](auto &p, const auto &v) {
@@ -166,7 +163,7 @@ options()
     {"--stretch", "gamma", [](auto &p, const auto &v) { p.stretch = std::stod(v); }},
     {"--distort", "eps", [](auto &p, const auto &v) { p.distort = std::stod(v); }},
     {"--steady-tol", "eps", [](auto &p, const auto &v) { p.steady_tol = std::stod(v); }},
-    {"--cg-tol", "eps", [](auto &p, const auto &v) { p.cg_tolerance = std::stod(v); }},
+    {"--cg-tol", "eps", [](auto &p, const auto &v) { p.mass.cg_tolerance = std::stod(v); }},
     {"--checkpoint", "name", [](auto &p, const auto &v) { p.checkpoint = v; }},
     {"--restart", "name", [](auto &p, const auto &v) { p.restart = v; }},
     {"--no-output", "", [](auto &p, const auto &) { p.output = false; }},
@@ -199,7 +196,7 @@ Parameters::parse(int argc, char **argv)
       opt->set(prm, value);
     }
   const bool cavity = prm.test_case == Case::cavity;
-  AssertThrow(prm.streaming == Streaming::tg2 || (prm.scheme == SchemeType::bardow && prm.mass == Mass::cg),
+  AssertThrow(prm.streaming == Streaming::tg2 || (prm.scheme == SchemeType::bardow && prm.mass.type == Mass::cg),
               ExcMessage("--streaming tg3 needs --scheme bardow and --mass cg"));
   if (prm.reynolds.empty())
     prm.reynolds = {prm.test_case == Case::tgv ? 100. : cavity ? 400. : 10.};
@@ -215,7 +212,7 @@ Parameters::parse(int argc, char **argv)
 class CGDBE
 {
 public:
-  static constexpr int fe_degree = CGDBE_DEGREE; // 1: bilinear, as in the papers
+  static constexpr int fe_degree = LBFEM_DEGREE; // 1: bilinear, as in the papers
   using Disc                     = Discretization<fe_degree>;
 
   explicit CGDBE(const Parameters &prm);
@@ -233,15 +230,6 @@ private:
   write_gnuplot(const std::string &name);
   void
   print_summary(const double seconds) const;
-
-  // Arithmetic per node (D2Q9, a multiply-add counts 2) for the summary; see
-  // README. bardow collision: moments 20, equilibrium 102, relaxation 18,
-  // increment 8. leelin: equilibrium 122, predictor 32, equilibrium of fhat
-  // 122, corrector 27. Advection per cell and population (Q1, cartesian):
-  // gradients 72, quadrature 24, integration 88.
-  static constexpr double flops_collision_bardow = 148;
-  static constexpr double flops_collision_leelin = 303;
-  static constexpr double flops_advection_cell   = 184. * (fe_degree == 1 ? 1. : 3.5 * fe_degree);
 
   const Parameters          prm;
   std::unique_ptr<TestCase> tc;
@@ -285,25 +273,22 @@ CGDBE::setup()
 
   // --- unit box: periodic (tgv) or wall-clustered (cavity); DoF index 1 for
   // the stream function of a steady state
-  disc.reinit({.refinements = prm.refinements, .n_cells = prm.n_cells, .stream_function = steady}, *tc);
+  disc.reinit({.refinements = prm.mesh.refinements, .n_cells = prm.mesh.n_cells, .stream_function = steady}, *tc);
   {
     const auto n = disc.cell_batch_types();
     pcout << "  cell batches : " << disc.matrix_free->n_cell_batches() << " (cartesian " << n[0]
           << ", affine " << n[1] << ", general " << n[2] << ")\n";
   }
 
-  const typename MassSolver<fe_degree>::Settings mass{.type         = prm.mass,
-                                                       .richardson   = prm.richardson,
-                                                       .cg_tolerance = prm.cg_tolerance};
   if (is_bardow)
     scheme = std::make_unique<Bardow<fe_degree>>(
-      disc, walls, typename Bardow<fe_degree>::Settings{.streaming = prm.streaming, .mass = mass}, stage_timers);
+      disc, walls, StreamingSettings{.streaming = prm.streaming, .mass = prm.mass}, stage_timers);
   else
-    scheme = std::make_unique<LeeLin<fe_degree>>(disc, walls, mass, stage_timers);
+    scheme = std::make_unique<LeeLin<fe_degree>>(disc, walls, prm.mass, stage_timers);
 
   // --- physical parameters (lattice units: |e_x| = 1, c_s^2 = 1/3, rho0 = 1)
-  tc->U0 = prm.mach * std::sqrt(D2Q9::cs2);
-  dt     = prm.cfl * disc.h_min / (fe_degree * fe_degree);
+  tc->set_mach(prm.mach);
+  dt = disc.time_step(prm.cfl);
   set_reynolds(prm.reynolds.front());
   if (!steady && prm.max_steps == 0) // hit t_end exactly
     {
@@ -330,9 +315,9 @@ CGDBE::setup()
                                        prm.streaming == Streaming::tg3 ? "TG3" : "split TG3") +
                            " streaming)")
         << "\n  mass matrix  : "
-        << (prm.mass == Mass::lumped ? "lumped" :
-            prm.mass == Mass::cg     ? "consistent (CG + Jacobi, extrapolated start)" :
-                                       "lumped + " + std::to_string(prm.richardson) + " Richardson pass(es)")
+        << (prm.mass.type == Mass::lumped ? "lumped" :
+            prm.mass.type == Mass::cg     ? "consistent (CG + Jacobi, extrapolated start)" :
+                                            "lumped + " + std::to_string(prm.mass.richardson) + " Richardson pass(es)")
         << "\n  Ma = " << prm.mach << ", dt = " << dt << " (CFL " << dt / disc.h_min << ")\n";
 }
 
@@ -343,8 +328,8 @@ void
 CGDBE::set_reynolds(const double Re)
 {
   reynolds = Re;
-  tc->nu   = tc->U0 * tc->L / Re;
-  lambda   = tc->nu / D2Q9::cs2;
+  tc->set_reynolds(Re);
+  lambda   = tc->relaxation_time();
   t_ref    = tc->reference_time();
   n_steps  = prm.max_steps > 0 ? prm.max_steps :
                                  static_cast<unsigned int>(std::ceil(prm.t_end * t_ref / dt));
@@ -424,10 +409,8 @@ CGDBE::write_gnuplot(const std::string &name)
     disc.constraints.distribute(scheme->f.block(a));
 
   const auto      F = view(scheme->f);
-  BlockVectorType velocity(2);
-  for (unsigned int d = 0; d < 2; ++d)
-    disc.matrix_free->initialize_dof_vector(velocity.block(d));
-  velocity.collect_sizes();
+  BlockVectorType velocity;
+  disc.initialize(velocity, 2);
 
   using Row = std::array<double, 6>;
   std::vector<Row> local(disc.n_nodes());
@@ -579,26 +562,21 @@ void
 CGDBE::print_summary(const double seconds) const
 {
   const double nodes   = disc.dof_handler.n_dofs();
-  const auto  &mass    = scheme->streaming.mass;
+  const auto  &mass    = scheme->streaming.mass_solver();
   const double GB      = 1e-9 * nodes * sizeof(Number) * total_steps; // one vector pass, all steps
   pcout << "\n  time stepping : " << seconds << " s for " << total_steps << " steps  ("
         << 1e3 * seconds / total_steps << " ms/step)\n"
         << "  throughput    : " << 1e-6 * nodes * total_steps / seconds
         << " million node updates/s (MNUPS = MDoF/s, one DoF = all " << Q << " populations)\n";
-  if (prm.mass == Mass::cg)
+  if (prm.mass.type == Mass::cg)
     pcout << "  CG iterations : " << double(mass.cg_iterations) / (double(total_steps) * n_moving)
           << " per mass solve\n";
 
-  // Minimal traffic model: every vector is read or written once per pass, no
-  // cache reuse. Collision: leelin reads f (9) and writes feq (9), then reads
-  // f, feq, incr (9+9+8) and writes f (9); bardow reads/writes f (9+9) and
-  // adds incr to f (8+8 read, 8 write). Advection: reads f (8, +feq 8 for
-  // leelin) and writes rhs (8), the face loop re-reads a boundary layer only.
-  const double passes_coll = is_bardow ? 18 + 24 : 18 + 35;
-  const double passes_adv  = is_bardow ? 16 : 24;
+  // Work models of the library kernels (a single-pass traffic model and a
+  // flop count per node, see README).
   const double cells_per_node = double(disc.triangulation.n_global_active_cells()) / nodes;
-  const double flops_coll     = is_bardow ? flops_collision_bardow : flops_collision_leelin;
-  const double flops_adv      = flops_advection_cell * n_moving * cells_per_node * (is_bardow ? 1. : 1.4);
+  const Work   collision      = scheme->collision_work();
+  const Work   advection      = scheme->streaming.advection_operator().work(cells_per_node);
   const auto   stage = [&](const char *name, const StageTimers::Stage s, const double passes, const double flops) {
     const double sec = stage_timers.wall_time(s);
     pcout << "  " << std::left << std::setw(12) << name << std::right << std::setw(9) << std::fixed
@@ -610,8 +588,8 @@ CGDBE::print_summary(const double seconds) const
           << flops / (passes * sizeof(Number)) << " flop/byte)" << std::defaultfloat << "\n";
   };
   pcout << "  breakdown of the time stepping (single-pass traffic model, flop model, see README):\n";
-  stage("collision", StageTimers::collision, passes_coll, flops_coll);
-  stage("advection", StageTimers::advection, passes_adv, flops_adv);
+  stage("collision", StageTimers::collision, collision.vector_passes, collision.flops);
+  stage("advection", StageTimers::advection, advection.vector_passes, advection.flops);
   stage("mass solves", StageTimers::mass, mass.vector_passes / total_steps, mass.flops_per_node / total_steps);
   pcout << "  other (timers, loop overhead): " << std::fixed << std::setprecision(3)
         << seconds - stage_timers.wall_time(StageTimers::collision) -
