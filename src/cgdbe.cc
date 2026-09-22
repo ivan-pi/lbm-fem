@@ -657,8 +657,8 @@ public:
   using TG3LHS          = TG3Operator<dim, fe_degree, n_q_1d, Number>;
 
   explicit CGDBE(const Parameters &prm);
-  void
-  run();
+  bool
+  run(); // false if a steady-state search ran out of time
 
 private:
   // --- setup
@@ -1560,10 +1560,11 @@ CGDBE::write_gnuplot(const std::string &name)
 
 
 
-void
+bool
 CGDBE::run()
 {
   setup();
+  bool all_steady = true;
 
   MPI_Barrier(comm);
   Timer wall; // pure time stepping, excluding diagnostics and output
@@ -1596,6 +1597,7 @@ CGDBE::run()
         !steady ? std::max(1u, n_steps / std::max(1u, prm.n_diagnostic)) :
                  std::max(1u, static_cast<unsigned int>(std::lround(t_ref / dt)));
 
+      bool steady_state = false;
       while (step_no < n_steps)
         {
           wall.start();
@@ -1612,9 +1614,15 @@ CGDBE::run()
               if (converged && prm.max_steps == 0)
                 {
                   pcout << "  -> steady state\n";
+                  steady_state = true;
                   break;
                 }
             }
+        }
+      if (steady && !steady_state && prm.max_steps == 0)
+        {
+          pcout << "  -> no steady state within t/t_ref = " << prm.t_end << "\n";
+          all_steady = false;
         }
 
       if (prm.output)
@@ -1626,6 +1634,7 @@ CGDBE::run()
 
   print_summary(wall.wall_time());
   timer.print_wall_time_statistics(comm);
+  return all_steady;
 }
 
 
@@ -1681,7 +1690,8 @@ main(int argc, char **argv)
   try
     {
       Utilities::MPI::MPI_InitFinalize mpi(argc, argv, /*threads*/ 1);
-      CGDBE(Parameters::parse(argc, argv)).run();
+      if (!CGDBE(Parameters::parse(argc, argv)).run())
+        return 2;
     }
   catch (const std::exception &exc)
     {

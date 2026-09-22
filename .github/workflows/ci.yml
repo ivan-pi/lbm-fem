@@ -1,0 +1,71 @@
+name: CI
+
+# Pushes to main and pull requests; a commit on a PR branch runs once, not twice.
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['**.md', 'docs/**', 'analysis/**', 'requirements.txt']
+  pull_request:
+    paths-ignore: ['**.md', 'docs/**', 'analysis/**', 'requirements.txt']
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# An explicit bash runs steps with -eo pipefail, so "cgdbe | tee" fails with cgdbe.
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  cavity:
+    name: Build and run lid-driven cavity
+    runs-on: ubuntu-24.04
+    # deal.II built for the x86-64 baseline (SSE2), so it runs on any GitHub runner;
+    # the first line of cavity.log shows the resulting SIMD width.
+    # The image's default user cannot write to the mounted workspace.
+    container:
+      image: dealii/dealii:v9.7.1-noble
+      options: --user root
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install gnuplot
+        run: apt-get update -q && apt-get install -y -q --no-install-recommends gnuplot-nox
+
+      - name: Build
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j "$(nproc)"
+
+      # 16^2 Q1 elements, Re = 100 then 400 (continuation), each run to steady
+      # state (exit status 2 if either does not converge); about 10 s.
+      - name: Run
+        working-directory: build
+        run: timeout 120 ./cgdbe --case cavity --refine 4 --reynolds 100,400 --mass lumped | tee cavity.log
+
+      - name: Check against Ghia, Ghia & Shin (1982)
+        working-directory: build
+        run: |
+          check() {  # file, reference psi_max, relative tolerance
+            awk -v r="$2" -v tol="$3" '/^# primary vortex:/ { p = $6 } END {
+              e = (p - r) / r
+              printf "%s: psi_max = %s, Ghia et al. %s, deviation %+.1f %%\n", FILENAME, p, r, 100 * e
+              exit (p == "" || e < -tol || e > tol) }' "$1"
+          }
+          check cavity_Re100.dat 0.1034 0.1
+          check cavity_Re400.dat 0.1139 0.1
+
+      - name: Plot streamlines (Ghia et al. contour levels)
+        working-directory: build
+        run: gnuplot -e "levels='ghia'; out='cavity_ghia.png'" ../scripts/plot_cavity.gp
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: cavity
+          path: |
+            build/cavity.log
+            build/cavity_Re*.dat
+            build/cavity_ghia.png

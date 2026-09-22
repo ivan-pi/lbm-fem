@@ -2,7 +2,8 @@
 # preconditioned by the lumped mass:  x_0 = M_L^{-1} r,  x_{j+1} = x_j + M_L^{-1}(r - M x_j)
 # => M^{-1} ~ M_L^{-1} sum_{j<=k} (I - M M_L^{-1})^j, symbol sum (1-m)^j (h=1, M_L = 1).
 import numpy as np
-exec(open('lbm_spectral.py').read().split("print('critical")[0])
+from tg_spectral import sym1d
+from lbm_spectral import E, J
 def mass_inv_symbol(m, k):        # k passes (k = 0: lumped, inf: consistent)
     return sum((1 - m)**j for j in range(k + 1)) if k >= 0 else 1 / m
 def G_2d_rich(tx, ty, ex, ey, C, k):

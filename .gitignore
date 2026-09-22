@@ -1,0 +1,15 @@
+# CMake build tree
+build/
+
+# run output (cgdbe, scripts/run_perf.sh, analysis/)
+*.log
+*.png
+vortex_*.dat
+*_history.dat
+
+# LaTeX
+*.aux
+*.pdf
+
+# Python
+__pycache__/
