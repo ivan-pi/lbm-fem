@@ -1,7 +1,9 @@
 name: CI
 
+# Pushes to main and pull requests; a commit on a PR branch runs once, not twice.
 on:
   push:
+    branches: [main]
     paths-ignore: ['**.md', 'docs/**', 'analysis/**', 'requirements.txt']
   pull_request:
     paths-ignore: ['**.md', 'docs/**', 'analysis/**', 'requirements.txt']
@@ -29,7 +31,7 @@ jobs:
           cmake --build build -j "$(nproc)"
 
       # 16^2 Q1 elements, Re = 100 then 400 (continuation), each run to steady
-      # state; about 10 s.
+      # state (exit status 2 if either does not converge); about 10 s.
       - name: Run
         working-directory: build
         run: timeout 120 ./cgdbe --case cavity --refine 4 --reynolds 100,400 --mass lumped | tee cavity.log
@@ -37,7 +39,6 @@ jobs:
       - name: Check against Ghia, Ghia & Shin (1982)
         working-directory: build
         run: |
-          test "$(grep -c -- '-> steady state' cavity.log)" -eq 2
           check() {  # file, reference psi_max, relative tolerance
             awk -v r="$2" -v tol="$3" '/^# primary vortex:/ { p = $6 } END {
               e = (p - r) / r

@@ -209,7 +209,8 @@ extrapolation of the previous increments.
 * `--cfl` is $`\Delta t |e_x| / h_{min}`$.
 * A list of Reynolds numbers is run as a continuation, each starting from the
   previous steady state. The cavity stops when the mean velocity change per
-  $`t_{ref}`$ drops below `--steady-tol` (default $`10^{-4} U_0`$).
+  $`t_{ref}`$ drops below `--steady-tol` (default $`10^{-4} U_0`$). If that does not
+  happen within `--tend`, the output is still written but `cgdbe` exits with status 2.
 * `--checkpoint` writes the populations (one file per rank) at every diagnostic
   line, `--restart` reads them; same mesh, number of ranks and $`\Delta t`$.
 * `--stretch` $`\gamma`$: nodes at
