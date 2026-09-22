@@ -2,8 +2,14 @@ name: CI
 
 on:
   push:
+    paths-ignore: ['**.md', 'docs/**', 'analysis/**', 'requirements.txt']
   pull_request:
+    paths-ignore: ['**.md', 'docs/**', 'analysis/**', 'requirements.txt']
   workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   cavity:
@@ -33,11 +39,10 @@ jobs:
         run: |
           test "$(grep -c -- '-> steady state' cavity.log)" -eq 2
           check() {  # file, reference psi_max, relative tolerance
-            psi=$(sed -n 's/^# primary vortex: psi = \([-0-9.e]*\).*/\1/p' "$1")
-            awk -v f="$1" -v p="$psi" -v r="$2" -v tol="$3" 'BEGIN {
+            awk -v r="$2" -v tol="$3" '/^# primary vortex:/ { p = $6 } END {
               e = (p - r) / r
-              printf "%s: psi_max = %s, Ghia et al. %s, deviation %+.1f %%\n", f, p, r, 100 * e
-              exit (p == "" || e < -tol || e > tol) }'
+              printf "%s: psi_max = %s, Ghia et al. %s, deviation %+.1f %%\n", FILENAME, p, r, 100 * e
+              exit (p == "" || e < -tol || e > tol) }' "$1"
           }
           check cavity_Re100.dat 0.1034 0.1
           check cavity_Re400.dat 0.1139 0.1

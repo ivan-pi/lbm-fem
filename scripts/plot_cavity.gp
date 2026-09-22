@@ -16,7 +16,7 @@
 # levels = 'ghia': the 24 levels of Ghia, Ghia & Shin (1982), for all Re.
 
 if (!exists("dir"))    dir    = "."
-if (!exists("files"))  files  = system(sprintf("cd '%s' && ls cavity_Re*.dat 2>/dev/null | grep -v history | sort -t e -k 2 -n | sed 's|^|%s/|' | tr '\n' ' '", dir, dir))
+if (!exists("files"))  files  = system(sprintf("ls '%s'/cavity_Re*[0-9].dat 2>/dev/null | sort -V | tr '\n' ' '", dir))
 if (!exists("out"))    out    = "cavity.png"
 if (!exists("levels")) levels = "leelin"
 

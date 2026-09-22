@@ -19,13 +19,12 @@ endif()
 deal_ii_initialize_cached_variables()
 project(cgdbe LANGUAGES CXX)
 
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
 add_executable(cgdbe src/cgdbe.cc)
 deal_ii_setup_target(cgdbe)
-
-set_target_properties(cgdbe PROPERTIES
-  CXX_STANDARD 20
-  CXX_STANDARD_REQUIRED ON
-  CXX_EXTENSIONS OFF)
 
 # Polynomial degree of the FE_Q elements (compile-time constant of the kernels).
 set(CGDBE_DEGREE 1 CACHE STRING "Polynomial degree of the elements")
@@ -39,16 +38,15 @@ if(CGDBE_NATIVE)
   target_compile_options(cgdbe PRIVATE $<$<CONFIG:Release>:-O3 -march=native>)
 endif()
 
-# Optional helpers: stand-alone micro-benchmarks (plain C++) and the deal.II
-# element-matrix check that is compared against analysis/stencils.py.
+# Optional helpers: stand-alone micro-benchmarks (plain C++, always tuned for
+# the build machine, whose peak they measure) and the deal.II element-matrix
+# check that is compared against analysis/stencils.py.
 option(CGDBE_BUILD_EXTRAS "Build benchmarks/ and tools/" OFF)
 if(CGDBE_BUILD_EXTRAS)
   foreach(bench roofline stencil_bench)
     add_executable(${bench} benchmarks/${bench}.cc)
-    set_target_properties(${bench} PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
-    target_compile_options(${bench} PRIVATE $<$<CONFIG:Release>:-O3 -march=native>)
+    target_compile_options(${bench} PRIVATE -O3 -march=native)
   endforeach()
   add_executable(elem tools/elem.cc)
   deal_ii_setup_target(elem)
-  set_target_properties(elem PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
 endif()

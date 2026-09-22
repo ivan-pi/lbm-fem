@@ -1,7 +1,5 @@
 # CMake build tree
 build/
-CMakeCache.txt
-CMakeFiles/
 
 # run output (cgdbe, scripts/run_perf.sh, analysis/)
 *.log
@@ -15,4 +13,3 @@ vortex_*.dat
 
 # Python
 __pycache__/
-*.pyc
