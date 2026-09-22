@@ -216,7 +216,7 @@ extrapolation of the previous increments.
 * `--stretch` $`\gamma`$: nodes at
   $`x = \frac{1}{2} \left[ 1 + \tanh(\gamma (2 \xi - 1)) / \tanh \gamma \right]`$ for uniform $`\xi`$.
 
-CI (`.github/workflows/ci.yml`) builds against the Ubuntu 24.04 deal.II package, runs
+CI (`.github/workflows/ci.yml`) builds in the `dealii/dealii` Docker image, runs
 a coarse cavity to steady state, checks $`\psi_{max}`$ against Ghia, Ghia & Shin (1982)
 and uploads the streamline plot as a build artifact.
 

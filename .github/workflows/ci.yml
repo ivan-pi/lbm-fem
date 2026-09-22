@@ -13,17 +13,26 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# An explicit bash runs steps with -eo pipefail, so "cgdbe | tee" fails with cgdbe.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   cavity:
     name: Build and run lid-driven cavity
     runs-on: ubuntu-24.04
+    # deal.II built for the x86-64 baseline (SSE2), so it runs on any GitHub runner;
+    # the first line of cavity.log shows the resulting SIMD width.
+    # The image's default user cannot write to the mounted workspace.
+    container:
+      image: dealii/dealii:v9.7.1-noble
+      options: --user root
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install deal.II and gnuplot
-        run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends libdeal.ii-dev gnuplot-nox
+      - name: Install gnuplot
+        run: apt-get update -q && apt-get install -y -q --no-install-recommends gnuplot-nox
 
       - name: Build
         run: |
