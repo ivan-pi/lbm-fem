@@ -1,5 +1,7 @@
 # cgdbe – characteristic Galerkin discrete Boltzmann, matrix-free (deal.II)
 
+[![CI](https://github.com/ivan-pi/lbm-fem/actions/workflows/ci.yml/badge.svg)](https://github.com/ivan-pi/lbm-fem/actions/workflows/ci.yml)
+
 D2Q9, bilinear (Q1) elements, two test cases and two time-stepping schemes:
 
 | | |
@@ -212,6 +214,11 @@ extrapolation of the previous increments.
   line, `--restart` reads them; same mesh, number of ranks and $`\Delta t`$.
 * `--stretch` $`\gamma`$: nodes at
   $`x = \frac{1}{2} \left[ 1 + \tanh(\gamma (2 \xi - 1)) / \tanh \gamma \right]`$ for uniform $`\xi`$.
+
+CI (`.github/workflows/ci.yml`) builds against the Ubuntu 24.04 deal.II package,
+runs the cavity on $`16^2`$ $`Q_1`$ elements at $`Re`$ = 100 and 400 to steady state
+(about 10 s), checks $`\psi_{max}`$ against Ghia, Ghia & Shin (1982) to within 10 %
+and uploads the streamline plot (Ghia levels) as a build artifact.
 
 The benchmarks and `tools/elem.cc` are built with `-DCGDBE_BUILD_EXTRAS=ON`; the
 benchmarks need only a C++ compiler (`g++ -O3 -march=native benchmarks/roofline.cc`).
