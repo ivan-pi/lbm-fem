@@ -127,8 +127,12 @@ part by passing its own `AdvectionOperator` to a scheme. The virtual calls are
 made once per sweep; the physics at a quadrature point or node is a lambda that
 the compiler inlines into the loops. Against the hand-written kernels of the
 original single-file solver, the instruction counts (valgrind) of the
-advection kernels agree to 0.12 % and of whole runs to 0.2 %, and the results
-are bitwise identical. New drivers are added in
+advection kernels agree to 0.12 %. The nodal loop (`nodal_map`) is vectorized
+across nodes, which makes the collision 1.7-2.4 times faster
+(`benchmarks/collision_simd`); the results then agree with the scalar
+original to rounding (populations to ~1e-15 relative with lumped mass, to
+within the CG tolerance otherwise; the printed diagnostics except the ~1e-13
+mass drift are identical). New drivers are added in
 `CMakeLists.txt` with `lbfem_add_driver(name sources...)`.
 
 ### Matrix-free realisation
@@ -816,7 +820,8 @@ price of more steps; at a given error the higher degree still wins here.
   rest. Its 12 GB/s is 40 % of the in-place pattern roofline. Vectorising the
   nodal loop across nodes (AVX-512, 8 lanes) would raise the ceiling to about
   80 GFlop/s and make the collision bandwidth-bound at ≈ 31 GB/s / 144 B =
-  0.2 GNUPS. The advection loop has an intensity of 11 flop/byte — far on the
+  0.2 GNUPS. (Since done, with 4-lane AVX2, which GCC prefers here: 7 ns per
+  node in cache, 9 ns and 16 GB/s out of cache, against 17 and 15 ns before.) The advection loop has an intensity of 11 flop/byte — far on the
   compute side — and still reaches only 2.8 GFlop/s, 28 % of scalar peak, which
   confirms that its cost is instruction overhead around the arithmetic (see
   below), not flops and not bytes.

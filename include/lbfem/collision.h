@@ -1,6 +1,9 @@
 // Nodal (collision) part of the schemes. The populations are block vectors
-// with one block per lattice direction; nodal operations are lambdas mapped
-// over the locally owned nodes by nodal_map().
+// with one block per lattice direction (structure of arrays); nodal operations
+// are lambdas mapped over the locally owned nodes by nodal_map(), which the
+// compiler vectorizes across nodes. For that, an operation must be free of
+// branches that depend on the node (use selects, as Walls::impose does) and of
+// calls it cannot inline.
 //
 // Walls enter through the moments: on a wall node, Walls::macroscopic()
 // returns the prescribed wall velocity, which is how the boundary condition
@@ -13,6 +16,7 @@
 
 #include <array>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace lbfem
@@ -79,7 +83,8 @@ namespace lbfem
   // out_i <- op(i, in_i...) at every locally owned node i, with the
   // populations of each input at that node (a BlockVectorType of all
   // populations, or Moving{v}). out may be one of the inputs: each node is read
-  // before it is written.
+  // before it is written. The nodes are independent (ivdep), so the compiler
+  // vectorizes the loop across them once op is inlined.
   template <typename Op, NodalInput... In>
     requires std::is_invocable_r_v<Populations, Op &, unsigned int, const PopulationsOf<In> &...>
   void
@@ -90,7 +95,8 @@ namespace lbfem
     for (unsigned int a = 0; a < Q; ++a)
       O[a] = out.block(a).begin();
     const unsigned int n_nodes = out.block(0).locally_owned_size();
-    [&](const auto &...views) {
+    [&](const auto... views) { // local copies: their block pointers are loop invariant
+#pragma GCC ivdep
       for (unsigned int i = 0; i < n_nodes; ++i)
         {
           const Populations fi = op(i, views[i]...);
@@ -107,29 +113,53 @@ namespace lbfem
     void
     reinit(const std::vector<Point<dim>> &node, const TestCase &tc)
     {
-      of_node.resize(node.size());
+      std::vector<int> wall_of_node(node.size());
       for (unsigned int i = 0; i < node.size(); ++i)
-        of_node[i] = tc.wall_of(node[i]);
-      velocity.resize(tc.n_walls());
-      for (unsigned int w = 0; w < velocity.size(); ++w)
-        velocity[w] = tc.wall_velocity(w);
+        wall_of_node[i] = tc.wall_of(node[i]);
+      std::vector<std::array<Number, 2>> wall_velocity(tc.n_walls());
+      for (unsigned int w = 0; w < wall_velocity.size(); ++w)
+        wall_velocity[w] = tc.wall_velocity(w);
+      set(std::move(wall_of_node), std::move(wall_velocity));
+    }
+
+    // The wall index of every node (-1: interior) and the velocity of every wall.
+    void
+    set(std::vector<int> wall_of_node, std::vector<std::array<Number, 2>> wall_velocity)
+    {
+      of_node  = std::move(wall_of_node);
+      velocity = std::move(wall_velocity);
+      ux.assign(of_node.size(), 0.);
+      uy.assign(of_node.size(), 0.);
+      for (unsigned int i = 0; i < of_node.size(); ++i)
+        if (of_node[i] >= 0)
+          {
+            ux[i] = velocity[of_node[i]][0];
+            uy[i] = velocity[of_node[i]][1];
+          }
+    }
+
+    // m with the wall velocity on the wall nodes; a select on contiguous
+    // per-node data, not a branch or a gather, so that nodal loops vectorize.
+    D2Q9::Moments
+    impose(const unsigned int i, D2Q9::Moments m) const
+    {
+      const bool   on_wall = of_node[i] >= 0;
+      const double wx = ux[i], wy = uy[i]; // loaded on every node: no masked loads
+      m.ux = on_wall ? wx : m.ux;
+      m.uy = on_wall ? wy : m.uy;
+      return m;
     }
 
     // Moments of node i, with the wall velocity on wall nodes.
     D2Q9::Moments
     macroscopic(const unsigned int i, const Populations &fi) const
     {
-      auto m = D2Q9::moments(fi);
-      if (const int wall = of_node[i]; wall >= 0)
-        {
-          m.ux = velocity[wall][0];
-          m.uy = velocity[wall][1];
-        }
-      return m;
+      return impose(i, D2Q9::moments(fi));
     }
 
     std::vector<int>                   of_node;  // -1: interior, else index into velocity
     std::vector<std::array<Number, 2>> velocity; // per wall
+    std::vector<Number>                ux, uy;   // per node: the wall velocity, 0 on interior nodes
   };
 
   // feq <- feq(f), nodal (Lee & Lin).
@@ -177,24 +207,21 @@ namespace lbfem
   // g <- g - omega (g - geq), omega = dt / (lambda + dt/2). Wall nodes: the
   // non-equilibrium part is relaxed as everywhere else, the equilibrium part is
   // rebuilt with the wall velocity, so that the post-collision momentum is
-  // exactly rho u_wall before streaming.
+  // exactly rho u_wall before streaming. Both equilibria are computed on every
+  // node and selected, which vectorizes (a branch per node does not).
   inline void
   collide_bgk(BlockVectorType &g, const Walls &walls, const Number omega)
   {
     nodal_map(
       g,
       [&](const unsigned int i, const Populations &gi) {
-        const auto  geq = D2Q9::equilibrium(D2Q9::moments(gi));
+        const auto  m        = D2Q9::moments(gi);
+        const auto  geq      = D2Q9::equilibrium(m);
+        const auto  geq_wall = D2Q9::equilibrium(walls.impose(i, m));
+        const bool  interior = walls.of_node[i] < 0;
         Populations out;
-        if (walls.of_node[i] < 0)
-          for (unsigned int a = 0; a < Q; ++a)
-            out[a] = gi[a] - omega * (gi[a] - geq[a]);
-        else
-          {
-            const auto geq_wall = D2Q9::equilibrium(walls.macroscopic(i, gi));
-            for (unsigned int a = 0; a < Q; ++a)
-              out[a] = geq_wall[a] + (1. - omega) * (gi[a] - geq[a]);
-          }
+        for (unsigned int a = 0; a < Q; ++a)
+          out[a] = interior ? gi[a] - omega * (gi[a] - geq[a]) : geq_wall[a] + (1. - omega) * (gi[a] - geq[a]);
         return out;
       },
       g);

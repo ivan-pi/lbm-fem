@@ -1,9 +1,9 @@
 // BGK collision of the Bardow scheme on the populations of n nodes (a block
 // vector, one block per direction), two ways:
-//   library: lbfem::collide_bgk, one node at a time through 9-element arrays
-//            with a branch for wall nodes;
-//   simd:    a C/Fortran-style loop over nodes with the wall treatment as a
-//            blend and "omp simd", which the compiler vectorizes across nodes.
+//   library: lbfem::collide_bgk, a lambda mapped over the nodes by nodal_map
+//            (vectorized across nodes by the compiler);
+//   simd:    a hand-written C/Fortran-style loop over nodes with "omp simd",
+//            the reference for what vectorization can give.
 // Checks that both give the same populations (to rounding) and reports ns per
 // node. Built with -DLBFEM_BUILD_EXTRAS=ON;  collision_simd [n] [repetitions]
 // (the working set is 2 x 9 x 8 n bytes: in cache for small n).
@@ -69,20 +69,20 @@ main(int argc, char **argv)
   const double      omega = 1.6;
 
   // a square of nodes with walls on its border and a moving lid on top
-  Walls walls;
-  walls.velocity = {{{0., 0.}}, {{0.0577, 0.}}};
-  walls.of_node.resize(n);
+  std::vector<int>  wall_of_node(n);
   BlockVectorType   init(Q, n);
   const std::size_t side = std::lround(std::sqrt(double(n)));
   for (std::size_t i = 0; i < n; ++i)
     {
       const std::size_t x = i % side, y = i / side;
-      walls.of_node[i]    = (y + 1 == side) ? 1 : (x == 0 || x + 1 == side || y == 0) ? 0 : -1;
+      wall_of_node[i]     = (y + 1 == side) ? 1 : (x == 0 || x + 1 == side || y == 0) ? 0 : -1;
       const double ux = 0.03 * std::sin(0.1 * x), uy = 0.02 * std::cos(0.07 * y), rho = 1. + 1e-3 * std::sin(0.3 * i);
       const auto   feq = D2Q9::equilibrium({rho, ux, uy});
       for (unsigned int a = 0; a < Q; ++a)
         init.block(a)[i] = feq[a] * (1. + 1e-3 * std::cos(0.37 * i + a));
     }
+  Walls walls;
+  walls.set(std::move(wall_of_node), {{{0., 0.}}, {{0.0577, 0.}}});
 
   const auto time = [&](auto &&collide, BlockVectorType &g) {
     double best = 1e30;

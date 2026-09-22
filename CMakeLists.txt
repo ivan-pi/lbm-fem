@@ -32,7 +32,8 @@ set(LBFEM_DEGREE 1 CACHE STRING "Polynomial degree of the elements")
 option(LBFEM_NATIVE "Compile with -O3 -march=native" ON)
 
 # A driver: an executable built on deal.II and the header-only lbfem library
-# (include/lbfem). Its sources see LBFEM_DEGREE as a compile definition.
+# (include/lbfem). Its sources see LBFEM_DEGREE as a compile definition;
+# -fopenmp-simd enables the "omp simd" loops (no OpenMP runtime).
 # (Include directories rather than target_link_libraries, whose plain and
 # keyword forms deal_ii_setup_target does not mix with.)
 function(lbfem_add_driver name)
@@ -40,6 +41,7 @@ function(lbfem_add_driver name)
   deal_ii_setup_target(${name})
   target_include_directories(${name} PRIVATE ${PROJECT_SOURCE_DIR}/include)
   target_compile_definitions(${name} PRIVATE LBFEM_DEGREE=${LBFEM_DEGREE})
+  target_compile_options(${name} PRIVATE $<$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>>:-fopenmp-simd>)
   if(LBFEM_NATIVE)
     target_compile_options(${name} PRIVATE $<$<CONFIG:Release>:-O3 -march=native>)
   endif()
@@ -61,5 +63,4 @@ if(LBFEM_BUILD_EXTRAS)
   deal_ii_setup_target(elem)
   lbfem_add_driver(mass_preconditioners tools/mass_preconditioners.cc)
   lbfem_add_driver(collision_simd benchmarks/collision_simd.cc)
-  target_compile_options(collision_simd PRIVATE -fopenmp-simd)
 endif()
