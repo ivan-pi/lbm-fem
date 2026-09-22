@@ -1,0 +1,4 @@
+# Python packages for the scripts in analysis/
+numpy
+sympy
+matplotlib

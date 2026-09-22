@@ -1,7 +1,7 @@
 # Extensions of lbm_spectral.py: (a) dimensionally split streaming (x sweep, then
 # y sweep; exact for the diagonal shift at C = 1), (b) regularised collision.
-import numpy as np
-exec(open('lbm_spectral.py').read().split("print('critical")[0])
+import numpy as np, os
+exec(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'lbm_spectral.py')).read().split("print('critical")[0])
 def S_split(tx, ty, ex, ey, C, tg3):
     gx = G_1d(tx, C*abs(ex), tg3) if ex else 1.
     gy = G_1d(ty, C*abs(ey), tg3) if ey else 1.

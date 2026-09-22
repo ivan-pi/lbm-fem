@@ -1,7 +1,10 @@
-# Generates fem_stencils.tex: element matrices -> nodal stencils -> equivalent
-# differential operators for the characteristic Galerkin schemes (Q1, Q2).
+# Generates docs/figures/fem_stencils_*.tex: element matrices -> nodal stencils ->
+# equivalent differential operators for the characteristic Galerkin schemes (Q1, Q2).
+import os
 import sympy as sp
 from stencils import element_matrices, stencils, taylor, h
+
+OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'docs', 'figures')
 
 def tex(v):
     v = sp.nsimplify(v)
@@ -165,8 +168,8 @@ Element matrices: \texttt{stencils.py} (sympy) and \texttt{elem.cc} (deal.II \te
     out.append(r'\end{document}')
     return '\n'.join(out)
 
-open('fem_stencils_q1.tex', 'w').write(figure_q1())
-open('fem_stencils_q2.tex', 'w').write(figure_q2())
+open(os.path.join(OUT, 'fem_stencils_q1.tex'), 'w').write(figure_q1())
+open(os.path.join(OUT, 'fem_stencils_q2.tex'), 'w').write(figure_q2())
 
 
 # ---------------------------------------------------------------------------
@@ -247,4 +250,4 @@ A vertex is shared by 4 elements ($5\times5$ stencil), an edge midpoint by 2 ($5
     out.append(r'\end{document}')
     return '\n'.join(out)
 
-open('fem_stencils_q2_elements.tex', 'w').write(figure_q2_elements())
+open(os.path.join(OUT, 'fem_stencils_q2_elements.tex'), 'w').write(figure_q2_elements())

@@ -1,7 +1,8 @@
 # Streamlines of the lid-driven cavity: contours of the stream function written
 # by  cgdbe --case cavity.
 #
-#   gnuplot plot_cavity.gp                                    # all cavity_Re*.dat
+#   gnuplot plot_cavity.gp                                    # all cavity_Re*.dat in .
+#   gnuplot -e "dir='data/cavity'" scripts/plot_cavity.gp     # the reference results
 #   gnuplot -e "levels='ghia'" plot_cavity.gp                 # Ghia et al. (1982) levels
 #   gnuplot -e "files='cavity_Re400.dat'; out='re400.png'" plot_cavity.gp
 #
@@ -14,7 +15,8 @@
 #   depend on Re, plus a fixed set of secondary-vortex levels in every panel.
 # levels = 'ghia': the 24 levels of Ghia, Ghia & Shin (1982), for all Re.
 
-if (!exists("files"))  files  = system("ls cavity_Re*.dat 2>/dev/null | grep -v history | sort -t e -k 2 -n | tr '\n' ' '")
+if (!exists("dir"))    dir    = "."
+if (!exists("files"))  files  = system(sprintf("cd '%s' && ls cavity_Re*.dat 2>/dev/null | grep -v history | sort -t e -k 2 -n | sed 's|^|%s/|' | tr '\n' ' '", dir, dir))
 if (!exists("out"))    out    = "cavity.png"
 if (!exists("levels")) levels = "leelin"
 

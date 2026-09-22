@@ -19,7 +19,7 @@ endif()
 deal_ii_initialize_cached_variables()
 project(cgdbe LANGUAGES CXX)
 
-add_executable(cgdbe cgdbe.cc)
+add_executable(cgdbe src/cgdbe.cc)
 deal_ii_setup_target(cgdbe)
 
 set_target_properties(cgdbe PROPERTIES
@@ -37,4 +37,18 @@ target_compile_definitions(cgdbe PRIVATE CGDBE_DEGREE=${CGDBE_DEGREE})
 option(CGDBE_NATIVE "Compile with -O3 -march=native" ON)
 if(CGDBE_NATIVE)
   target_compile_options(cgdbe PRIVATE $<$<CONFIG:Release>:-O3 -march=native>)
+endif()
+
+# Optional helpers: stand-alone micro-benchmarks (plain C++) and the deal.II
+# element-matrix check that is compared against analysis/stencils.py.
+option(CGDBE_BUILD_EXTRAS "Build benchmarks/ and tools/" OFF)
+if(CGDBE_BUILD_EXTRAS)
+  foreach(bench roofline stencil_bench)
+    add_executable(${bench} benchmarks/${bench}.cc)
+    set_target_properties(${bench} PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
+    target_compile_options(${bench} PRIVATE $<$<CONFIG:Release>:-O3 -march=native>)
+  endforeach()
+  add_executable(elem tools/elem.cc)
+  deal_ii_setup_target(elem)
+  set_target_properties(elem PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
 endif()

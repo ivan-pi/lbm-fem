@@ -3,8 +3,8 @@
 #   g^{n+1}(theta) = S(theta) [I - omega (I - J)] g^n(theta),
 # S = diag(G_alpha(theta)) the streaming amplification of direction alpha,
 # J_{ab} = w_a (1 + 3 e_a.e_b) the Jacobian of f^eq at rho = 1, u = 0.
-import numpy as np, sys
-exec(open('tg_spectral.py').read().split('th = np.linspace')[0])
+import numpy as np, sys, os
+exec(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tg_spectral.py')).read().split('th = np.linspace')[0])
 E = [(0,0),(1,0),(1,1),(0,1),(-1,1),(-1,0),(-1,-1),(0,-1),(1,-1)]
 W = [4/9,1/9,1/36,1/9,1/36,1/9,1/36,1/9,1/36]
 J = np.array([[W[a]*(1+3*(E[a][0]*E[b][0]+E[a][1]*E[b][1])) for b in range(9)] for a in range(9)])
