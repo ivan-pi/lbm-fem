@@ -17,26 +17,35 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 deal_ii_initialize_cached_variables()
-project(cgdbe LANGUAGES CXX)
+project(lbfem LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-add_executable(cgdbe src/cgdbe.cc)
-deal_ii_setup_target(cgdbe)
-
 # Polynomial degree of the FE_Q elements (compile-time constant of the kernels).
 set(CGDBE_DEGREE 1 CACHE STRING "Polynomial degree of the elements")
-target_compile_definitions(cgdbe PRIVATE CGDBE_DEGREE=${CGDBE_DEGREE})
 
-# The matrix-free kernels are header templates that are compiled here, so they
-# benefit from native tuning. The SIMD width of VectorizedArray, however, is
-# fixed by how deal.II itself was configured.
+# The matrix-free kernels are header templates that are compiled with each
+# driver, so they benefit from native tuning. The SIMD width of VectorizedArray,
+# however, is fixed by how deal.II itself was configured.
 option(CGDBE_NATIVE "Compile with -O3 -march=native" ON)
-if(CGDBE_NATIVE)
-  target_compile_options(cgdbe PRIVATE $<$<CONFIG:Release>:-O3 -march=native>)
-endif()
+
+# A driver: an executable built on deal.II and the header-only lbfem library
+# (include/lbfem). Its sources see CGDBE_DEGREE as a compile definition.
+# (Include directories rather than target_link_libraries, whose plain and
+# keyword forms deal_ii_setup_target does not mix with.)
+function(lbfem_add_driver name)
+  add_executable(${name} ${ARGN})
+  deal_ii_setup_target(${name})
+  target_include_directories(${name} PRIVATE ${PROJECT_SOURCE_DIR}/include)
+  target_compile_definitions(${name} PRIVATE CGDBE_DEGREE=${CGDBE_DEGREE})
+  if(CGDBE_NATIVE)
+    target_compile_options(${name} PRIVATE $<$<CONFIG:Release>:-O3 -march=native>)
+  endif()
+endfunction()
+
+lbfem_add_driver(cgdbe apps/cgdbe/cgdbe.cc)
 
 # Optional helpers: stand-alone micro-benchmarks (plain C++, always tuned for
 # the build machine, whose peak they measure) and the deal.II element-matrix
