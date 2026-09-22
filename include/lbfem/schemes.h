@@ -12,14 +12,19 @@
 //     g* = g - omega (g - geq),  omega = dt / (lambda + dt/2)    (exact BGK)
 //     M (g^{n+1} - g*) = -dt C g* - dt^2 D g*      (weak form of their Eq. 9)
 //
-// The rest population (e_0 = 0) needs neither loop nor solve.
+// Each scheme streams through an AdvectionOperator (advection.h): by default
+// the one of its paper, or any other a driver passes in. The rest population
+// (e_0 = 0) needs neither loop nor solve.
 #pragma once
 
+#include <lbfem/advection.h>
 #include <lbfem/collision.h>
 #include <lbfem/discretization.h>
 #include <lbfem/streaming.h>
 #include <lbfem/test_case.h>
 #include <lbfem/timers.h>
+
+#include <memory>
 
 namespace lbfem
 {
@@ -27,30 +32,19 @@ namespace lbfem
   class Scheme
   {
   public:
-    using Disc = Discretization<fe_degree>;
-
-    Scheme(const Disc                                      &disc,
-           const Walls                                     &walls,
-           const typename TaylorGalerkin<fe_degree>::Settings &streaming_settings,
-           StageTimers                                     &timers)
-      : disc(disc)
-      , walls(walls)
-      , timers(timers)
-      , streaming(disc, streaming_settings, timers)
-    {
-      disc.initialize(f, Q);
-    }
+    using Disc      = Discretization<fe_degree>;
+    using Advection = std::unique_ptr<AdvectionOperator<fe_degree>>;
+    using Settings  = typename TaylorGalerkin<fe_degree>::Settings;
 
     virtual ~Scheme() = default;
 
     // The time step is fixed; the relaxation time lambda = nu / c_s^2 may change
     // between runs (a Reynolds number continuation).
-    virtual void
-    set_time_step(const Number time_step, const Number relaxation_time)
+    void
+    set_time_step(const TimeStep &time_step)
     {
-      dt     = time_step;
-      lambda = relaxation_time;
-      streaming.set_time_step(dt, lambda);
+      ts = time_step;
+      streaming.set_time_step(ts);
     }
 
     virtual void
@@ -65,41 +59,51 @@ namespace lbfem
     void
     set_initial_populations(const TestCase &tc)
     {
-      const auto F = raw(f);
-      for (unsigned int i = 0; i < disc.n_nodes(); ++i)
-        {
-          const auto f0 = tc.initial_populations(disc.node[i], lambda, neq_scale());
-          for (unsigned int a = 0; a < Q; ++a)
-            F[a][i] = f0[a];
-        }
+      const Number scale = neq_scale();
+      nodal_map(f, [&](const unsigned int i) { return tc.initial_populations(disc.node[i], ts.lambda, scale); });
     }
 
-    BlockVectorType f; // populations: f (LeeLin) or g (Bardow), Q blocks
-
   protected:
+    Scheme(const Disc &disc, const Walls &walls, const Settings &settings, Advection advection, StageTimers &timers)
+      : disc(disc)
+      , walls(walls)
+      , timers(timers)
+      , streaming(disc, settings, std::move(advection), timers)
+    {
+      disc.initialize(f, Q);
+    }
+
     const Disc  &disc;
     const Walls &walls;
     StageTimers &timers;
-    Number       dt = 0., lambda = 0.;
+    TimeStep     ts{0., 0.};
 
   public:
     TaylorGalerkin<fe_degree> streaming;
+    BlockVectorType           f; // populations: f (LeeLin) or g (Bardow), Q blocks
   };
 
 
 
   template <int fe_degree>
-  class LeeLin : public Scheme<fe_degree>
+  class LeeLin final : public Scheme<fe_degree>
   {
   public:
     using Base = Scheme<fe_degree>;
 
-    // Lee & Lin keep the wall surface term as it is and use TG2 streaming.
-    LeeLin(const typename Base::Disc &disc,
-           const Walls               &walls,
+    // TG2 streaming; by default with the advection of Lee & Lin, which keeps
+    // the wall surface term as it is. A custom advection receives the
+    // equilibria in AdvectionInput::feq.
+    LeeLin(const typename Base::Disc                      &disc,
+           const Walls                                    &walls,
            const typename MassSolver<fe_degree>::Settings &mass,
-           StageTimers               &timers)
-      : Base(disc, walls, {Streaming::tg2, mass, /*remove_wall_mass_flux*/ false}, timers)
+           StageTimers                                    &timers,
+           typename Base::Advection                        advection = nullptr)
+      : Base(disc,
+             walls,
+             {.streaming = Streaming::tg2, .mass = mass},
+             advection ? std::move(advection) : std::make_unique<LeeLinAdvection<fe_degree>>(disc),
+             timers)
     {
       disc.initialize(feq, Q);
     }
@@ -107,15 +111,11 @@ namespace lbfem
     void
     step() override
     {
-      {
-        StageTimers::Scope t(this->timers, StageTimers::collision);
-        compute_equilibrium(this->f, feq, this->walls);
-      }
-      this->streaming.compute_increment(this->f, &feq);
-      {
-        StageTimers::Scope t(this->timers, StageTimers::collision);
-        predictor_corrector(this->f, feq, this->streaming.incr, this->walls, this->dt / this->lambda);
-      }
+      this->timers.time(StageTimers::collision, [&] { compute_equilibrium(this->f, feq, this->walls); });
+      this->streaming.compute_increment({.f = this->f, .feq = &feq});
+      this->timers.time(StageTimers::collision, [&] {
+        predictor_corrector(this->f, feq, Moving{this->streaming.incr}, this->walls, this->ts.dt / this->ts.lambda);
+      });
     }
 
     Number
@@ -131,34 +131,38 @@ namespace lbfem
 
 
   template <int fe_degree>
-  class Bardow : public Scheme<fe_degree>
+  class Bardow final : public Scheme<fe_degree>
   {
   public:
     using Base = Scheme<fe_degree>;
 
-    // Any streaming variant; the mass flux of the wall surface term is removed.
-    Bardow(const typename Base::Disc &disc,
-           const Walls               &walls,
-           const Streaming            streaming,
-           const typename MassSolver<fe_degree>::Settings &mass,
-           StageTimers               &timers)
-      : Base(disc, walls, {streaming, mass, /*remove_wall_mass_flux*/ true}, timers)
+    // Any streaming variant; by default with the advection of Bardow et al.,
+    // which removes the mass flux of the wall surface term.
+    Bardow(const typename Base::Disc     &disc,
+           const Walls                   &walls,
+           const typename Base::Settings &settings,
+           StageTimers                   &timers,
+           typename Base::Advection       advection = nullptr)
+      : Base(disc,
+             walls,
+             settings,
+             advection ? std::move(advection) :
+                         std::make_unique<TaylorGalerkinAdvection<fe_degree>>(disc, /*remove_wall_mass_flux*/ true),
+             timers)
     {}
 
     void
     step() override
     {
-      {
-        StageTimers::Scope t(this->timers, StageTimers::collision);
-        collide_bgk(this->f, this->walls, this->dt / (this->lambda + 0.5 * this->dt));
-      }
+      const auto [dt, lambda] = this->ts;
+      this->timers.time(StageTimers::collision, [&] { collide_bgk(this->f, this->walls, dt / (lambda + 0.5 * dt)); });
       this->streaming.stream(this->f);
     }
 
     Number
     neq_scale() const override
     {
-      return 1. + 0.5 * this->dt / this->lambda;
+      return 1. + 0.5 * this->ts.dt / this->ts.lambda;
     }
   };
 } // namespace lbfem

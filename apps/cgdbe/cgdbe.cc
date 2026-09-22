@@ -40,12 +40,14 @@
 #include <array>
 #include <cmath>
 #include <fstream>
+#include <functional>
 #include <iomanip>
 #include <iostream>
 #include <memory>
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <vector>
 
 using namespace dealii;
@@ -76,7 +78,7 @@ struct Parameters
   SchemeType   scheme     = SchemeType::bardow;
   Mass         mass       = Mass::cg;
   unsigned int richardson = 2;              // passes for Mass::richardson
-  Streaming    streaming  = Streaming::tg2;       // bardow only
+  Streaming    streaming  = Streaming::tg2; // bardow only
 
   unsigned int refinements = 6;   // 2^n x 2^n elements ...
   unsigned int n_cells     = 0;   // ... or, if > 0, n_cells x n_cells elements
@@ -98,103 +100,115 @@ struct Parameters
   std::string  restart;             // read initial populations from this checkpoint
 
   static Parameters
-  parse(int argc, char **argv)
-  {
-    Parameters prm;
-    for (int i = 1; i < argc; ++i)
-      {
-        const std::string_view key  = argv[i];
-        const auto             next = [&]() -> std::string {
-          AssertThrow(i + 1 < argc, ExcMessage("missing value for " + std::string(key)));
-          return argv[++i];
-        };
-        const auto choose = [&](const std::string &value, const std::vector<std::string> &names) {
-          for (unsigned int k = 0; k < names.size(); ++k)
-            if (value == names[k])
-              return k;
-          AssertThrow(false, ExcMessage(std::string(key) + ": unknown value " + value));
-          return 0u;
-        };
-        if (key == "--case")
-          prm.test_case = static_cast<Case>(choose(next(), {"tgv", "couette", "cavity"}));
-        else if (key == "--scheme")
-          prm.scheme = static_cast<SchemeType>(choose(next(), {"leelin", "bardow"}));
-        else if (key == "--mass")
-          {
-            const auto v = next(); // cg | lumped | richardson[k]
-            if (v.rfind("richardson", 0) == 0)
-              {
-                prm.mass = Mass::richardson;
-                if (v.size() > 10)
-                  prm.richardson = std::stoul(v.substr(10));
-              }
-            else
-              prm.mass = static_cast<Mass>(choose(v, {"cg", "lumped"}));
-          }
-        else if (key == "--streaming")
-          prm.streaming = static_cast<Streaming>(choose(next(), {"tg2", "tg3", "tg3-split"}));
-        else if (key == "--refine")
-          prm.refinements = std::stoul(next());
-        else if (key == "--cells")
-          prm.n_cells = std::stoul(next());
-        else if (key == "--mach")
-          prm.mach = std::stod(next());
-        else if (key == "--modes")
-          {
-            const auto v = next();
-            const auto c = v.find(',');
-            AssertThrow(c != std::string::npos, ExcMessage("--modes n1,n2"));
-            prm.modes[0] = std::stoul(v.substr(0, c));
-            prm.modes[1] = std::stoul(v.substr(c + 1));
-          }
-        else if (key == "--reynolds")
-          {
-            std::stringstream list(next());
-            for (std::string item; std::getline(list, item, ',');)
-              prm.reynolds.push_back(std::stod(item));
-          }
-        else if (key == "--cfl")
-          prm.cfl = std::stod(next());
-        else if (key == "--tend")
-          prm.t_end = std::stod(next());
-        else if (key == "--steps")
-          prm.max_steps = std::stoul(next());
-        else if (key == "--stretch")
-          prm.stretch = std::stod(next());
-        else if (key == "--distort")
-          prm.distort = std::stod(next());
-        else if (key == "--steady-tol")
-          prm.steady_tol = std::stod(next());
-        else if (key == "--cg-tol")
-          prm.cg_tolerance = std::stod(next());
-        else if (key == "--checkpoint")
-          prm.checkpoint = next();
-        else if (key == "--restart")
-          prm.restart = next();
-        else if (key == "--no-output")
-          prm.output = false;
-        else
-          AssertThrow(false,
-                      ExcMessage("unknown option " + std::string(key) +
-                                 "\noptions: --case tgv|couette|cavity --scheme leelin|bardow "
-                                 "--mass cg|lumped|richardson[k] --streaming tg2|tg3|tg3-split "
-                                 "--refine n | --cells N --mach Ma --modes n1,n2 --reynolds Re[,Re..] "
-                                 "--cfl c --tend t/t_ref --steps n --stretch gamma --distort eps "
-                                 "--steady-tol eps --cg-tol eps --checkpoint name --restart name "
-                                 "--no-output"));
-      }
-    const bool cavity = prm.test_case == Case::cavity;
-    AssertThrow(prm.streaming == Streaming::tg2 || (prm.scheme == SchemeType::bardow && prm.mass == Mass::cg),
-                ExcMessage("--streaming tg3 needs --scheme bardow and --mass cg"));
-    if (prm.reynolds.empty())
-      prm.reynolds = {prm.test_case == Case::tgv ? 100. : cavity ? 400. : 10.};
-    if (prm.cfl <= 0.)
-      prm.cfl = !cavity ? 0.25 : (prm.scheme == SchemeType::leelin ? 0.5 : 0.4);
-    if (prm.t_end <= 0.)
-      prm.t_end = cavity ? 100. : 1.;
-    return prm;
-  }
+  parse(int argc, char **argv);
 };
+
+
+
+// An option: its name, the form of its value ("" for a flag) and what it sets.
+struct Option
+{
+  std::string_view                                        name, value;
+  std::function<void(Parameters &, const std::string &)> set;
+};
+
+// The index of value in names, as the enum E (enumerators in the same order).
+template <typename E>
+  requires std::is_enum_v<E>
+E
+choose(const std::string_view option, const std::string &value, const std::vector<std::string_view> &names)
+{
+  const auto it = std::ranges::find(names, value);
+  AssertThrow(it != names.end(), ExcMessage(std::string(option) + ": unknown value " + value));
+  return static_cast<E>(it - names.begin());
+}
+
+const std::vector<Option> &
+options()
+{
+  static const std::vector<Option> table = {
+    {"--case", "tgv|couette|cavity",
+     [](auto &p, const auto &v) { p.test_case = choose<Case>("--case", v, {"tgv", "couette", "cavity"}); }},
+    {"--scheme", "leelin|bardow",
+     [](auto &p, const auto &v) { p.scheme = choose<SchemeType>("--scheme", v, {"leelin", "bardow"}); }},
+    {"--mass", "cg|lumped|richardson[k]",
+     [](auto &p, const auto &v) {
+       if (v.starts_with("richardson"))
+         {
+           p.mass = Mass::richardson;
+           if (v.size() > 10)
+             p.richardson = std::stoul(v.substr(10));
+         }
+       else
+         p.mass = choose<Mass>("--mass", v, {"cg", "lumped"});
+     }},
+    {"--streaming", "tg2|tg3|tg3-split",
+     [](auto &p, const auto &v) { p.streaming = choose<Streaming>("--streaming", v, {"tg2", "tg3", "tg3-split"}); }},
+    {"--refine", "n", [](auto &p, const auto &v) { p.refinements = std::stoul(v); }},
+    {"--cells", "N", [](auto &p, const auto &v) { p.n_cells = std::stoul(v); }},
+    {"--mach", "Ma", [](auto &p, const auto &v) { p.mach = std::stod(v); }},
+    {"--modes", "n1,n2",
+     [](auto &p, const auto &v) {
+       const auto c = v.find(',');
+       AssertThrow(c != std::string::npos, ExcMessage("--modes n1,n2"));
+       p.modes[0] = std::stoul(v.substr(0, c));
+       p.modes[1] = std::stoul(v.substr(c + 1));
+     }},
+    {"--reynolds", "Re[,Re..]",
+     [](auto &p, const auto &v) {
+       std::stringstream list(v);
+       for (std::string item; std::getline(list, item, ',');)
+         p.reynolds.push_back(std::stod(item));
+     }},
+    {"--cfl", "c", [](auto &p, const auto &v) { p.cfl = std::stod(v); }},
+    {"--tend", "t/t_ref", [](auto &p, const auto &v) { p.t_end = std::stod(v); }},
+    {"--steps", "n", [](auto &p, const auto &v) { p.max_steps = std::stoul(v); }},
+    {"--stretch", "gamma", [](auto &p, const auto &v) { p.stretch = std::stod(v); }},
+    {"--distort", "eps", [](auto &p, const auto &v) { p.distort = std::stod(v); }},
+    {"--steady-tol", "eps", [](auto &p, const auto &v) { p.steady_tol = std::stod(v); }},
+    {"--cg-tol", "eps", [](auto &p, const auto &v) { p.cg_tolerance = std::stod(v); }},
+    {"--checkpoint", "name", [](auto &p, const auto &v) { p.checkpoint = v; }},
+    {"--restart", "name", [](auto &p, const auto &v) { p.restart = v; }},
+    {"--no-output", "", [](auto &p, const auto &) { p.output = false; }},
+  };
+  return table;
+}
+
+Parameters
+Parameters::parse(int argc, char **argv)
+{
+  const auto usage = [] {
+    std::string text = "options:";
+    for (const auto &[name, value, set] : options())
+      text += " " + std::string(name) + (value.empty() ? "" : " " + std::string(value));
+    return text;
+  };
+
+  Parameters prm;
+  for (int i = 1; i < argc; ++i)
+    {
+      const std::string_view key = argv[i];
+      const auto             opt = std::ranges::find(options(), key, &Option::name);
+      AssertThrow(opt != options().end(), ExcMessage("unknown option " + std::string(key) + "\n" + usage()));
+      std::string value;
+      if (!opt->value.empty())
+        {
+          AssertThrow(i + 1 < argc, ExcMessage("missing value for " + std::string(key)));
+          value = argv[++i];
+        }
+      opt->set(prm, value);
+    }
+  const bool cavity = prm.test_case == Case::cavity;
+  AssertThrow(prm.streaming == Streaming::tg2 || (prm.scheme == SchemeType::bardow && prm.mass == Mass::cg),
+              ExcMessage("--streaming tg3 needs --scheme bardow and --mass cg"));
+  if (prm.reynolds.empty())
+    prm.reynolds = {prm.test_case == Case::tgv ? 100. : cavity ? 400. : 10.};
+  if (prm.cfl <= 0.)
+    prm.cfl = !cavity ? 0.25 : (prm.scheme == SchemeType::leelin ? 0.5 : 0.4);
+  if (prm.t_end <= 0.)
+    prm.t_end = cavity ? 100. : 1.;
+  return prm;
+}
 
 // ---------------------------------- driver -----------------------------------
 
@@ -271,16 +285,19 @@ CGDBE::setup()
 
   // --- unit box: periodic (tgv) or wall-clustered (cavity); DoF index 1 for
   // the stream function of a steady state
-  disc.reinit({prm.refinements, prm.n_cells, /*stream_function*/ steady}, *tc);
+  disc.reinit({.refinements = prm.refinements, .n_cells = prm.n_cells, .stream_function = steady}, *tc);
   {
     const auto n = disc.cell_batch_types();
     pcout << "  cell batches : " << disc.matrix_free->n_cell_batches() << " (cartesian " << n[0]
           << ", affine " << n[1] << ", general " << n[2] << ")\n";
   }
 
-  const typename MassSolver<fe_degree>::Settings mass{prm.mass, prm.richardson, prm.cg_tolerance};
+  const typename MassSolver<fe_degree>::Settings mass{.type         = prm.mass,
+                                                       .richardson   = prm.richardson,
+                                                       .cg_tolerance = prm.cg_tolerance};
   if (is_bardow)
-    scheme = std::make_unique<Bardow<fe_degree>>(disc, walls, prm.streaming, mass, stage_timers);
+    scheme = std::make_unique<Bardow<fe_degree>>(
+      disc, walls, typename Bardow<fe_degree>::Settings{.streaming = prm.streaming, .mass = mass}, stage_timers);
   else
     scheme = std::make_unique<LeeLin<fe_degree>>(disc, walls, mass, stage_timers);
 
@@ -291,7 +308,7 @@ CGDBE::setup()
   if (!steady && prm.max_steps == 0) // hit t_end exactly
     {
       dt = prm.t_end * t_ref / n_steps;
-      scheme->set_time_step(dt, lambda);
+      scheme->set_time_step({.dt = dt, .lambda = lambda});
     }
 
   // --- wall nodes, initial condition
@@ -333,7 +350,7 @@ CGDBE::set_reynolds(const double Re)
                                  static_cast<unsigned int>(std::ceil(prm.t_end * t_ref / dt));
   time = time_previous = 0.;
   step_no              = 0;
-  scheme->set_time_step(dt, lambda);
+  scheme->set_time_step({.dt = dt, .lambda = lambda});
 }
 
 
@@ -346,11 +363,11 @@ CGDBE::diagnostics(std::ostream *file)
 {
   TimerOutput::Scope t(timer, "diagnostics + output");
 
-  const auto          F = raw(scheme->f);
+  const auto          F = view(scheme->f);
   std::vector<double> s(6, 0.); // |u-u_ex|^2, |u_ex|^2, |u|^2, rho, area, |u-u_prev|
   for (const unsigned int i : disc.independent)
     {
-      const auto m  = D2Q9::moments(gather(F, i));
+      const auto m  = D2Q9::moments(F[i]);
       const auto ex = tc->exact(disc.node[i], time);
       const double w = disc.node_weight.local_element(i); // lumped-mass quadrature
       s[0] += w * ((m.ux - ex.ux) * (m.ux - ex.ux) + (m.uy - ex.uy) * (m.uy - ex.uy));
@@ -406,7 +423,7 @@ CGDBE::write_gnuplot(const std::string &name)
   for (unsigned int a = 0; a < Q; ++a) // fill in the periodic slave nodes
     disc.constraints.distribute(scheme->f.block(a));
 
-  const auto      F = raw(scheme->f);
+  const auto      F = view(scheme->f);
   BlockVectorType velocity(2);
   for (unsigned int d = 0; d < 2; ++d)
     disc.matrix_free->initialize_dof_vector(velocity.block(d));
@@ -416,7 +433,7 @@ CGDBE::write_gnuplot(const std::string &name)
   std::vector<Row> local(disc.n_nodes());
   for (unsigned int i = 0; i < disc.n_nodes(); ++i)
     {
-      const auto m = walls.macroscopic(i, gather(F, i));
+      const auto m = walls.macroscopic(i, F[i]);
       local[i]     = {{disc.node[i][0], disc.node[i][1], m.ux / tc->U0, m.uy / tc->U0,
                        std::hypot(m.ux, m.uy) / tc->U0, m.rho - tc->rho0}};
       velocity.block(0).local_element(i) = m.ux / tc->U0;

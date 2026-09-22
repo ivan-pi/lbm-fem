@@ -62,4 +62,40 @@ namespace lbfem::D2Q9
       }
     return feq;
   }
+
+  // Checked at compile time: the lattice tensors are isotropic up to 4th
+  // order (as the Navier-Stokes limit needs), sum_a w_a e_a...e_a =
+  //   1, 0, c_s^2 delta_ij, 0, c_s^4 (delta_ij delta_kl + delta_ik delta_jl + delta_il delta_jk),
+  // and the equilibrium has the density and velocity it was built from.
+  namespace detail
+  {
+    constexpr bool
+    near(const double x, const double y)
+    {
+      return (x > y ? x - y : y - x) < 1e-14;
+    }
+
+    template <typename... Index>
+    constexpr double
+    lattice_tensor(const Index... i)
+    {
+      double sum = 0;
+      for (unsigned int a = 0; a < Q; ++a)
+        sum += (w[a] * ... * e[a][i]);
+      return sum;
+    }
+  } // namespace detail
+
+  static_assert(detail::near(detail::lattice_tensor(), 1.));
+  static_assert(detail::near(detail::lattice_tensor(0), 0.) && detail::near(detail::lattice_tensor(1), 0.));
+  static_assert(detail::near(detail::lattice_tensor(0, 0), cs2) && detail::near(detail::lattice_tensor(1, 1), cs2) &&
+                detail::near(detail::lattice_tensor(0, 1), 0.));
+  static_assert(detail::near(detail::lattice_tensor(0, 0, 0), 0.) && detail::near(detail::lattice_tensor(0, 1, 1), 0.));
+  static_assert(detail::near(detail::lattice_tensor(0, 0, 0, 0), 3 * cs2 * cs2) &&
+                detail::near(detail::lattice_tensor(0, 0, 1, 1), cs2 * cs2) &&
+                detail::near(detail::lattice_tensor(0, 0, 0, 1), 0.));
+  static_assert([] {
+    const Moments m = moments(equilibrium({1.1, 0.05, -0.02}));
+    return detail::near(m.rho, 1.1) && detail::near(m.ux, 0.05) && detail::near(m.uy, -0.02);
+  }());
 } // namespace lbfem::D2Q9

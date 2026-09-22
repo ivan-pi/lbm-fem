@@ -1,10 +1,10 @@
 // Nodal (collision) part of the schemes. The populations are block vectors
-// with one block per lattice direction; the nodal operations work on the
-// locally owned entries only.
+// with one block per lattice direction; nodal operations are lambdas mapped
+// over the locally owned nodes by nodal_map().
 //
-// Walls enter through the moments: on a wall node, macroscopic() returns the
-// prescribed wall velocity, which is how the boundary condition acts in the
-// equilibria of both schemes.
+// Walls enter through the moments: on a wall node, Walls::macroscopic()
+// returns the prescribed wall velocity, which is how the boundary condition
+// acts in the equilibria of both schemes.
 #pragma once
 
 #include <lbfem/d2q9.h>
@@ -12,6 +12,7 @@
 #include <lbfem/test_case.h>
 
 #include <array>
+#include <type_traits>
 #include <vector>
 
 namespace lbfem
@@ -19,24 +20,84 @@ namespace lbfem
   inline constexpr unsigned int Q        = D2Q9::Q;
   inline constexpr unsigned int n_moving = Q - 1; // the rest population needs no streaming
 
-  // Pointers to the locally owned entries of each block.
-  inline std::array<Number *, Q>
-  raw(BlockVectorType &v)
+  using Populations = std::array<Number, Q>; // at one node
+
+  // A vector of the moving populations only: block b holds population b + 1
+  // (the streaming increments, for example).
+  struct Moving
   {
-    std::array<Number *, Q> p{};
-    for (unsigned int b = 0; b < v.n_blocks(); ++b)
-      p[b] = v.block(b).begin();
-    return p;
+    const BlockVectorType &v;
+  };
+
+  // Read access to the populations first..Q-1 of each locally owned node,
+  // stored in blocks 0..Q-1-first; populations below first read as zero.
+  // The layout is part of the type, so the gathers are fully unrolled.
+  template <unsigned int first>
+  class NodalView
+  {
+  public:
+    explicit NodalView(const BlockVectorType &v)
+    {
+      AssertDimension(v.n_blocks(), Q - first);
+      for (unsigned int b = 0; b < Q - first; ++b)
+        p[b] = v.block(b).begin();
+    }
+
+    Populations
+    operator[](const unsigned int i) const
+    {
+      Populations fi;
+      for (unsigned int a = 0; a < first; ++a)
+        fi[a] = 0.;
+      for (unsigned int a = first; a < Q; ++a)
+        fi[a] = p[a - first][i];
+      return fi;
+    }
+
+  private:
+    std::array<const Number *, Q - first> p{};
+  };
+
+  inline NodalView<0>
+  view(const BlockVectorType &v)
+  {
+    return NodalView<0>(v);
   }
 
-  // The Q populations of node i.
-  inline std::array<Number, Q>
-  gather(const std::array<Number *, Q> &F, const unsigned int i)
+  inline NodalView<1>
+  view(const Moving &m)
   {
-    std::array<Number, Q> fi;
+    return NodalView<1>(m.v);
+  }
+
+  template <typename T>
+  concept NodalInput = std::same_as<T, BlockVectorType> || std::same_as<T, Moving>;
+
+  template <typename>
+  using PopulationsOf = Populations; // maps a pack of inputs to a pack of Populations
+
+  // out_i <- op(i, in_i...) at every locally owned node i, with the
+  // populations of each input at that node (a BlockVectorType of all
+  // populations, or Moving{v}). out may be one of the inputs: each node is read
+  // before it is written.
+  template <typename Op, NodalInput... In>
+    requires std::is_invocable_r_v<Populations, Op &, unsigned int, const PopulationsOf<In> &...>
+  void
+  nodal_map(BlockVectorType &out, Op &&op, const In &...in)
+  {
+    AssertDimension(out.n_blocks(), Q);
+    std::array<Number *, Q> O;
     for (unsigned int a = 0; a < Q; ++a)
-      fi[a] = F[a][i];
-    return fi;
+      O[a] = out.block(a).begin();
+    const unsigned int n_nodes = out.block(0).locally_owned_size();
+    [&](const auto &...views) {
+      for (unsigned int i = 0; i < n_nodes; ++i)
+        {
+          const Populations fi = op(i, views[i]...);
+          for (unsigned int a = 0; a < Q; ++a)
+            O[a][i] = fi[a];
+        }
+    }(view(in)...);
   }
 
   // Wall nodes and their velocities, from TestCase::wall_of and wall_velocity.
@@ -54,7 +115,7 @@ namespace lbfem
 
     // Moments of node i, with the wall velocity on wall nodes.
     D2Q9::Moments
-    macroscopic(const unsigned int i, const std::array<Number, Q> &fi) const
+    macroscopic(const unsigned int i, const Populations &fi) const
     {
       auto m = D2Q9::moments(fi);
       if (const int wall = of_node[i]; wall >= 0)
@@ -71,40 +132,43 @@ namespace lbfem
 
   // feq <- feq(f), nodal (Lee & Lin).
   inline void
-  compute_equilibrium(BlockVectorType &f, BlockVectorType &feq, const Walls &walls)
+  compute_equilibrium(const BlockVectorType &f, BlockVectorType &feq, const Walls &walls)
   {
-    const auto F = raw(f), FEQ = raw(feq);
-    for (unsigned int i = 0; i < walls.of_node.size(); ++i)
-      {
-        const auto e = D2Q9::equilibrium(walls.macroscopic(i, gather(F, i)));
-        for (unsigned int a = 0; a < Q; ++a)
-          FEQ[a][i] = e[a];
-      }
+    nodal_map(
+      feq,
+      [&](const unsigned int i, const Populations &fi) { return D2Q9::equilibrium(walls.macroscopic(i, fi)); },
+      f);
   }
 
   // Lee & Lin, with tau = dt/lambda and the streaming increments x = M^{-1} r of
-  // the moving populations: predictor (Eq. 17) (1 + tau) fhat = f + tau feq + x,
-  // corrector (Eq. 18) f^{n+1} = fhat + tau (feq(fhat) - feq(f^n)).
+  // the moving populations (x_0 = 0): predictor (Eq. 17)
+  // (1 + tau) fhat = f + tau feq + x, corrector (Eq. 18)
+  // f^{n+1} = fhat + tau (feq(fhat) - feq(f^n)).
   inline void
   predictor_corrector(BlockVectorType       &f,
-                      BlockVectorType       &feq,
-                      BlockVectorType       &incr,
+                      const BlockVectorType &feq,
+                      const Moving          &incr,
                       const Walls           &walls,
                       const Number           tau)
   {
-    const auto   F = raw(f), FEQ = raw(feq), X = raw(incr);
     const Number inv = 1. / (1. + tau);
-    for (unsigned int i = 0; i < walls.of_node.size(); ++i)
-      {
-        std::array<Number, Q> fhat;
-        fhat[0] = inv * (F[0][i] + tau * FEQ[0][i]);
+    nodal_map(
+      f,
+      [&](const unsigned int i, const Populations &fi, const Populations &feqi, const Populations &x) {
+        Populations fhat;
+        fhat[0] = inv * (fi[0] + tau * feqi[0]);
         for (unsigned int a = 1; a < Q; ++a)
-          fhat[a] = inv * (F[a][i] + tau * FEQ[a][i] + X[a - 1][i]);
+          fhat[a] = inv * (fi[a] + tau * feqi[a] + x[a]);
 
-        const auto eq_hat = D2Q9::equilibrium(walls.macroscopic(i, fhat));
+        const auto  eq_hat = D2Q9::equilibrium(walls.macroscopic(i, fhat));
+        Populations out;
         for (unsigned int a = 0; a < Q; ++a)
-          F[a][i] = fhat[a] + tau * (eq_hat[a] - FEQ[a][i]);
-      }
+          out[a] = fhat[a] + tau * (eq_hat[a] - feqi[a]);
+        return out;
+      },
+      f,
+      feq,
+      incr);
   }
 
   // BGK collision of the transformed populations g (Bardow et al.),
@@ -115,20 +179,22 @@ namespace lbfem
   inline void
   collide_bgk(BlockVectorType &g, const Walls &walls, const Number omega)
   {
-    const auto G = raw(g);
-    for (unsigned int i = 0; i < walls.of_node.size(); ++i)
-      {
-        const auto gi  = gather(G, i);
-        const auto geq = D2Q9::equilibrium(D2Q9::moments(gi));
+    nodal_map(
+      g,
+      [&](const unsigned int i, const Populations &gi) {
+        const auto  geq = D2Q9::equilibrium(D2Q9::moments(gi));
+        Populations out;
         if (walls.of_node[i] < 0)
           for (unsigned int a = 0; a < Q; ++a)
-            G[a][i] -= omega * (gi[a] - geq[a]);
+            out[a] = gi[a] - omega * (gi[a] - geq[a]);
         else
           {
             const auto geq_wall = D2Q9::equilibrium(walls.macroscopic(i, gi));
             for (unsigned int a = 0; a < Q; ++a)
-              G[a][i] = geq_wall[a] + (1. - omega) * (gi[a] - geq[a]);
+              out[a] = geq_wall[a] + (1. - omega) * (gi[a] - geq[a]);
           }
-      }
+        return out;
+      },
+      g);
   }
 } // namespace lbfem

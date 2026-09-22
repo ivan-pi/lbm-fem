@@ -5,6 +5,9 @@
 #include <deal.II/base/timer.h>
 
 #include <array>
+#include <concepts>
+#include <functional>
+#include <utility>
 
 namespace lbfem
 {
@@ -47,6 +50,15 @@ namespace lbfem
       dealii::TimerOutput::Scope section;
       dealii::Timer             &timer;
     };
+
+    // Runs fn() within the given stage and returns its result.
+    template <std::invocable F>
+    decltype(auto)
+    time(const Stage stage, F &&fn)
+    {
+      const Scope scope(*this, stage);
+      return std::invoke(std::forward<F>(fn));
+    }
 
     double
     wall_time(const Stage stage) const

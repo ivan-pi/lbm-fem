@@ -19,7 +19,7 @@ namespace lbfem
 
   struct TestCase
   {
-    double L = 1., U0 = 0., nu = 0., rho0 = 1.; // set by the solver
+    double L = 1., U0 = 0., nu = 0., rho0 = 1.; // set by the driver
 
     virtual ~TestCase() = default;
     virtual std::string

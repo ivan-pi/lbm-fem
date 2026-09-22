@@ -91,6 +91,12 @@ namespace lbfem
       Mass         type         = Mass::cg;
       unsigned int richardson   = 2;    // passes for Mass::richardson
       double       cg_tolerance = 1e-8; // relative to |r|
+      // A safety cap: CG throws SolverControl::NoConvergence when it is hit.
+      // The Jacobi-preconditioned mass matrix has a condition number bounded
+      // independently of h (at most 9 for Q1 on a uniform grid), and a cold
+      // start needs about 25 iterations at the default tolerance and 38 at
+      // 1e-12, from 32^2 to 512^2 cells (the extrapolated start, 2-16).
+      unsigned int cg_max_iterations = 200;
     };
 
     MassSolver(const Disc &disc, const Settings &settings)
@@ -129,7 +135,7 @@ namespace lbfem
 
           case Mass::cg:
             {
-              SolverControl        control(200, settings.cg_tolerance * r.l2_norm());
+              SolverControl        control(settings.cg_max_iterations, settings.cg_tolerance * r.l2_norm());
               SolverCG<VectorType> cg(control);
               if (tg3_coefficient == 0.)
                 cg.solve(disc.mass, x, r, *disc.mass.get_matrix_diagonal_inverse());
