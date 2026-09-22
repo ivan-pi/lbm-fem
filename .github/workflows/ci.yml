@@ -29,7 +29,7 @@ jobs:
       image: dealii/dealii:v9.7.1-noble
       options: --user root
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install gnuplot
         run: apt-get update -q && apt-get install -y -q --no-install-recommends gnuplot-nox
@@ -61,7 +61,7 @@ jobs:
         working-directory: build
         run: gnuplot -e "levels='ghia'; out='cavity_ghia.png'" ../scripts/plot_cavity.gp
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: cavity
