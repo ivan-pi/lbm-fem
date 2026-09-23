@@ -21,6 +21,9 @@ analyses and the performance measurements are in the other pages of
 - T. Lee, C.-L. Lin, *A characteristic Galerkin method for discrete Boltzmann
   equation*, J. Comput. Phys. **171**(1) (2001) 336–356.
   [doi:10.1006/jcph.2001.6791](https://doi.org/10.1006/jcph.2001.6791)
+- T. Lee, C.-L. Lin, *An Eulerian description of the streaming process in
+  the lattice Boltzmann equation*, J. Comput. Phys. **185**(2) (2003) 445–471.
+  [doi:10.1016/S0021-9991(02)00065-7](https://doi.org/10.1016/S0021-9991(02)00065-7)
 - A. Bardow, I. V. Karlin, A. A. Gusev, *General characteristic-based
   algorithm for off-lattice Boltzmann simulations*, EPL (Europhysics Letters)
   **75**(3) (2006) 434–440.
