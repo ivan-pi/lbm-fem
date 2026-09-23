@@ -146,11 +146,11 @@ namespace lbfem
 
 
   // A diagonal preconditioner for the fused CG that offers apply_to_subrange()
-  // only. Given the per-entry apply() of DiagonalMatrix, SolverCG (deal.II
-  // 9.5-9.7) preconditions lane by lane into a SIMD register; that runs ~3x
-  // slower than the vector updates it fuses (~9 ns per entry and iteration,
-  // with SSE2 or without SIMD, in or out of cache), whereas on blocks of 128
-  // entries it costs about as much as the unfused updates, or less.
+  // only. Given the per-entry apply() of DiagonalMatrix, SolverCG
+  // preconditions lane by lane into a SIMD register, which with SIMD width 2
+  // (deal.II 9.7.1) makes its updates 2.5-4x slower than on blocks of 128
+  // entries, and the fused CG slower than the unfused one (see
+  // docs/dealii-fused-cg.md).
   struct BlockJacobi
   {
     void
