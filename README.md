@@ -19,26 +19,29 @@ analyses and the performance measurements are in the other pages of
 ## References
 
 - T. Lee, C.-L. Lin, *A characteristic Galerkin method for discrete Boltzmann
-  equation*, J. Comput. Phys. **171** (2001) 336–356.
+  equation*, J. Comput. Phys. **171**(1) (2001) 336–356.
   [doi:10.1006/jcph.2001.6791](https://doi.org/10.1006/jcph.2001.6791)
 - A. Bardow, I. V. Karlin, A. A. Gusev, *General characteristic-based
-  algorithm for off-lattice Boltzmann simulations*, EPL **75** (2006) 434–440.
+  algorithm for off-lattice Boltzmann simulations*, EPL (Europhysics Letters)
+  **75**(3) (2006) 434–440.
   [doi:10.1209/epl/i2006-10138-1](https://doi.org/10.1209/epl/i2006-10138-1)
 - J. Donea, *A Taylor–Galerkin method for convective transport problems*,
-  Int. J. Numer. Methods Eng. **20** (1984) 101–119.
+  Int. J. Numer. Methods Eng. **20**(1) (1984) 101–119.
   [doi:10.1002/nme.1620200108](https://doi.org/10.1002/nme.1620200108)
 - Z. Guo, T. S. Zhao, *Explicit finite-difference lattice Boltzmann method
-  for curvilinear coordinates*, Phys. Rev. E **67** (2003) 066709.
+  for curvilinear coordinates*, Phys. Rev. E **67**(6) (2003) 066709.
   [doi:10.1103/PhysRevE.67.066709](https://doi.org/10.1103/PhysRevE.67.066709)
 - R. Mei, W. Shyy, *On the finite difference-based lattice Boltzmann method
-  in curvilinear coordinates*, J. Comput. Phys. **143** (1998) 426–448.
+  in curvilinear coordinates*, J. Comput. Phys. **143**(2) (1998) 426–448.
   [doi:10.1006/jcph.1998.5984](https://doi.org/10.1006/jcph.1998.5984)
 - U. Ghia, K. N. Ghia, C. T. Shin, *High-Re solutions for incompressible flow
   using the Navier–Stokes equations and a multigrid method*, J. Comput. Phys.
-  **48** (1982) 387–411.
+  **48**(3) (1982) 387–411.
   [doi:10.1016/0021-9991(82)90058-4](https://doi.org/10.1016/0021-9991(82)90058-4)
-- D. Arndt et al., *The deal.II finite element library: Design, features, and
-  insights*, Comput. Math. Appl. **81** (2021) 407–422.
+- D. Arndt, W. Bangerth, D. Davydov, T. Heister, L. Heltai, M. Kronbichler,
+  M. Maier, J.-P. Pelteret, B. Turcksin, D. Wells, *The deal.II finite element
+  library: Design, features, and insights*, Comput. Math. Appl. **81** (2021)
+  407–422.
   [doi:10.1016/j.camwa.2020.02.022](https://doi.org/10.1016/j.camwa.2020.02.022)
 
 ## Requirements
