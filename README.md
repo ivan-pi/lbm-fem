@@ -776,16 +776,21 @@ price of more steps; at a given error the higher degree still wins here.
   model (every vector read or written once per pass, no cache reuse): `bardow`
   collision 42 vector passes (collide in place 9+9, add the increment 8+8+8),
   advection 16 (read 8, write 8), lumped mass 16; `leelin` collision 53, advection
-  24 (it also reads $`f^{eq}`$); CG 10 passes per iteration plus 4. A vector pass is
+  24 (it also reads $`f^{eq}`$); CG 8 passes per iteration plus 4, Richardson 3 plus
+  5 per pass (their vector updates run inside the cell loop of the operator, on
+  each range of entries just before and after the loop touches it, with
+  $`A p`$ and $`M x`$ still in cache). A vector pass is
   $`8 N_{nodes}`$ bytes. On this VM a numpy copy runs at 14 GB/s, a triad at 8 GB/s.
+  The stage times are accumulated per MPI rank, without synchronizing the time
+  loop, and the summary shows their maximum over the ranks.
 
   Next to it a **flop model** (multiply-add counted as 2; the per-node counts are
-  in the source next to `flops_collision_bardow` etc.): `bardow` collision 148 flops
-  per node (moments 20, equilibrium 102, relaxation 18, increment 8), `leelin`
+  in the source next to `collision_work()` etc.): `bardow` collision 157 flops
+  per node (moments 20, equilibrium 102, relaxation 27, increment 8), `leelin`
   303; advection 184 flops per cell and population for $`Q_1`$ on a cartesian cell
   (sum-factorised gradients 72, quadrature 24, integration 88), i.e. 1461 per
-  node and step for 8 populations; mass vmult 68 per cell, CG 11 per node and
-  iteration on top; lumped 1.
+  node and step for 8 populations; mass vmult 68 per cell, CG 21 per node and
+  iteration on top (updates and 7 reductions); lumped 1.
 
   The roofline itself is measured, not assumed (`benchmarks/roofline.cc`, one core):
 

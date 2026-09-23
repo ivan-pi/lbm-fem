@@ -230,8 +230,8 @@ private:
   const MPI_Comm            comm = MPI_COMM_WORLD;
 
   ConditionalOStream pcout;
-  TimerOutput        timer;
-  StageTimers        stage_timers;
+  TimerOutput        timer;        // setup, diagnostics and output (outside the time loop)
+  StageTimers        stage_timers; // the stages of a time step, per rank
 
   Disc                                     disc;
   Walls                                    walls;
@@ -254,7 +254,6 @@ CGDBE::CGDBE(const Parameters &prm)
   , steady(!tc->has_exact_solution())
   , pcout(std::cout, Utilities::MPI::this_mpi_process(comm) == 0)
   , timer(comm, pcout, TimerOutput::never, TimerOutput::wall_times)
-  , stage_timers(timer)
   , disc(comm)
 {}
 
@@ -550,10 +549,23 @@ CGDBE::run()
 
 
 // Stepping time, throughput and, per stage, the effective bandwidth of a
-// single-pass traffic model and the rate of a flop model (see README).
+// single-pass traffic model and the rate of a flop model (see README). The
+// times are the maxima over the ranks.
 void
-CGDBE::print_summary(const double seconds) const
+CGDBE::print_summary(const double stepping_seconds) const
 {
+  // stepping, collision, advection, mass solves, other
+  std::vector<double> t(5);
+  t[0] = stepping_seconds;
+  t[4] = stepping_seconds;
+  for (const auto s : {StageTimers::collision, StageTimers::advection, StageTimers::mass})
+    {
+      t[1 + s] = stage_timers.wall_time(s);
+      t[4] -= t[1 + s];
+    }
+  Utilities::MPI::max(t, comm, t);
+  const double seconds = t[0];
+
   const double nodes   = disc.dof_handler.n_dofs();
   const auto  &mass    = scheme->streaming.mass_solver();
   const double GB      = 1e-9 * nodes * sizeof(Number) * total_steps; // one vector pass, all steps
@@ -570,8 +582,7 @@ CGDBE::print_summary(const double seconds) const
   const double cells_per_node = double(disc.triangulation.n_global_active_cells()) / nodes;
   const Work   collision      = scheme->collision_work();
   const Work   advection      = scheme->streaming.advection_operator().work(cells_per_node);
-  const auto   stage = [&](const char *name, const StageTimers::Stage s, const double passes, const double flops) {
-    const double sec = stage_timers.wall_time(s);
+  const auto   stage = [&](const char *name, const double sec, const double passes, const double flops) {
     pcout << "  " << std::left << std::setw(12) << name << std::right << std::setw(9) << std::fixed
           << std::setprecision(3) << sec << " s " << std::setw(5) << std::setprecision(1)
           << 100 * sec / seconds << " % " << std::setw(6) << std::setprecision(2) << passes * GB / sec
@@ -580,14 +591,12 @@ CGDBE::print_summary(const double seconds) const
           << " flops per node and step, intensity " << std::setprecision(2)
           << flops / (passes * sizeof(Number)) << " flop/byte)" << std::defaultfloat << "\n";
   };
-  pcout << "  breakdown of the time stepping (single-pass traffic model, flop model, see README):\n";
-  stage("collision", StageTimers::collision, collision.vector_passes, collision.flops);
-  stage("advection", StageTimers::advection, advection.vector_passes, advection.flops);
-  stage("mass solves", StageTimers::mass, mass.vector_passes / total_steps, mass.flops_per_node / total_steps);
-  pcout << "  other (timers, loop overhead): " << std::fixed << std::setprecision(3)
-        << seconds - stage_timers.wall_time(StageTimers::collision) -
-             stage_timers.wall_time(StageTimers::advection) - stage_timers.wall_time(StageTimers::mass)
-        << " s" << std::defaultfloat << "\n";
+  pcout << "  breakdown of the time stepping (max over ranks; single-pass traffic model, flop model, see README):\n";
+  stage("collision", t[1], collision.vector_passes, collision.flops);
+  stage("advection", t[2], advection.vector_passes, advection.flops);
+  stage("mass solves", t[3], mass.vector_passes / total_steps, mass.flops_per_node / total_steps);
+  pcout << "  other (timers, loop overhead): " << std::fixed << std::setprecision(3) << t[4] << " s"
+        << std::defaultfloat << "\n";
 }
 
 

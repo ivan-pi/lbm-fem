@@ -33,12 +33,13 @@ using namespace lbfem;
 
 constexpr int p = LBFEM_DEGREE;
 using Disc      = Discretization<p>;
-using TG3LHS    = TG3Operator<p>;
+using TG3LHS    = StreamingMatrix<p>;
 using Jacobi    = DiagonalMatrix<VectorType>;
 
 // Counts the applications of an operator. Chebyshev keeps a pointer to it
 // (hence Subscriptor) and checks its size (m(); el() is never called, since it
-// gets the Jacobi preconditioner).
+// gets the Jacobi preconditioner). Without the fused vmult of StreamingMatrix,
+// CG runs its classic, unfused iteration here.
 template <typename Operator>
 struct Counted : Subscriptor
 {
@@ -129,8 +130,7 @@ study(const std::string &label, TestCase &tc, const unsigned int refinements)
     v = uni(gen);
   disc.constraints.set_zero(random);
 
-  TimerOutput timer_output(MPI_COMM_WORLD, std::cout, TimerOutput::never, TimerOutput::wall_times);
-  StageTimers timers(timer_output);
+  StageTimers timers;
   Walls       walls;
   tc.set_mach(0.1);
   tc.set_reynolds(400.);

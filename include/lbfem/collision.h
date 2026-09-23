@@ -2,12 +2,13 @@
 // with one block per lattice direction (structure of arrays); nodal operations
 // are lambdas mapped over the locally owned nodes by nodal_map(), which the
 // compiler vectorizes across nodes. For that, an operation must be free of
-// branches that depend on the node (use selects, as Walls::impose does) and of
-// calls it cannot inline.
+// branches that depend on the node and of calls it cannot inline.
 //
-// Walls enter through the moments: on a wall node, Walls::macroscopic()
-// returns the prescribed wall velocity, which is how the boundary condition
-// acts in the equilibria of both schemes.
+// Walls enter through the moments: a nodal operation receives the velocity
+// the node imposes (FluidNode: its own, WallNode: the wall's), which is how
+// the boundary condition acts in the equilibria of both schemes. The loop over
+// all nodes is the fluid one; the few wall nodes are computed separately and
+// overwritten, so that the vectorized loop reads no wall data.
 #pragma once
 
 #include <lbfem/d2q9.h>
@@ -106,6 +107,29 @@ namespace lbfem
     }(view(in)...);
   }
 
+  // The velocity a node imposes on its moments: the fluid's own, or that of
+  // the wall it is on.
+  struct FluidNode
+  {
+    D2Q9::Moments
+    operator()(const D2Q9::Moments &m) const
+    {
+      return m;
+    }
+  };
+
+  struct WallNode
+  {
+    D2Q9::Moments
+    operator()(D2Q9::Moments m) const
+    {
+      m.ux = ux;
+      m.uy = uy;
+      return m;
+    }
+    Number ux, uy;
+  };
+
   // Wall nodes and their velocities, from TestCase::wall_of and wall_velocity.
   struct Walls
   {
@@ -127,48 +151,63 @@ namespace lbfem
     {
       of_node  = std::move(wall_of_node);
       velocity = std::move(wall_velocity);
-      ux.assign(of_node.size(), 0.);
-      uy.assign(of_node.size(), 0.);
+      nodes.clear();
       for (unsigned int i = 0; i < of_node.size(); ++i)
         if (of_node[i] >= 0)
-          {
-            ux[i] = velocity[of_node[i]][0];
-            uy[i] = velocity[of_node[i]][1];
-          }
+          nodes.push_back(i);
     }
 
-    // m with the wall velocity on the wall nodes; a select on contiguous
-    // per-node data, not a branch or a gather, so that nodal loops vectorize.
-    D2Q9::Moments
-    impose(const unsigned int i, D2Q9::Moments m) const
+    // What wall node k (of nodes) imposes.
+    WallNode
+    at(const unsigned int k) const
     {
-      const bool   on_wall = of_node[i] >= 0;
-      const double wx = ux[i], wy = uy[i]; // loaded on every node: no masked loads
-      m.ux = on_wall ? wx : m.ux;
-      m.uy = on_wall ? wy : m.uy;
-      return m;
+      const auto [ux, uy] = velocity[of_node[nodes[k]]];
+      return {ux, uy};
     }
 
-    // Moments of node i, with the wall velocity on wall nodes.
+    // Moments of node i, with the wall velocity on wall nodes (for output).
     D2Q9::Moments
     macroscopic(const unsigned int i, const Populations &fi) const
     {
-      return impose(i, D2Q9::moments(fi));
+      const auto m = D2Q9::moments(fi);
+      return of_node[i] < 0 ? m : WallNode{velocity[of_node[i]][0], velocity[of_node[i]][1]}(m);
     }
 
     std::vector<int>                   of_node;  // -1: interior, else index into velocity
     std::vector<std::array<Number, 2>> velocity; // per wall
-    std::vector<Number>                ux, uy;   // per node: the wall velocity, 0 on interior nodes
+    std::vector<unsigned int>          nodes;    // the wall nodes
   };
+
+  // out_i <- op(at_i, in_i...) at every locally owned node i, where at_i is
+  // what node i imposes on its moments (FluidNode or WallNode). The loop over
+  // all nodes, vectorized, is the fluid one; the wall nodes are computed
+  // before it from the inputs as they are (out may be one of them) and
+  // overwritten after it.
+  template <typename Op, NodalInput... In>
+    requires std::is_invocable_r_v<Populations, Op &, const FluidNode &, const PopulationsOf<In> &...> &&
+             std::is_invocable_r_v<Populations, Op &, const WallNode &, const PopulationsOf<In> &...>
+  void
+  nodal_map(BlockVectorType &out, const Walls &walls, Op &&op, const In &...in)
+  {
+    std::vector<Populations> at_wall(walls.nodes.size());
+    [&](const auto... views) {
+      for (unsigned int k = 0; k < at_wall.size(); ++k)
+        at_wall[k] = op(walls.at(k), views[walls.nodes[k]]...);
+    }(view(in)...);
+
+    nodal_map(out, [&](const unsigned int, const auto &...fi) { return op(FluidNode{}, fi...); }, in...);
+
+    for (unsigned int a = 0; a < Q; ++a)
+      for (unsigned int k = 0; k < at_wall.size(); ++k)
+        out.block(a).local_element(walls.nodes[k]) = at_wall[k][a];
+  }
 
   // feq <- feq(f), nodal (Lee & Lin).
   inline void
   compute_equilibrium(const BlockVectorType &f, BlockVectorType &feq, const Walls &walls)
   {
     nodal_map(
-      feq,
-      [&](const unsigned int i, const Populations &fi) { return D2Q9::equilibrium(walls.macroscopic(i, fi)); },
-      f);
+      feq, walls, [](const auto &at, const Populations &fi) { return D2Q9::equilibrium(at(D2Q9::moments(fi))); }, f);
   }
 
   // Lee & Lin, with tau = dt/lambda and the streaming increments x = M^{-1} r of
@@ -185,13 +224,14 @@ namespace lbfem
     const Number inv = 1. / (1. + tau);
     nodal_map(
       f,
-      [&](const unsigned int i, const Populations &fi, const Populations &feqi, const Populations &x) {
+      walls,
+      [&](const auto &at, const Populations &fi, const Populations &feqi, const Populations &x) {
         Populations fhat;
         fhat[0] = inv * (fi[0] + tau * feqi[0]);
         for (unsigned int a = 1; a < Q; ++a)
           fhat[a] = inv * (fi[a] + tau * feqi[a] + x[a]);
 
-        const auto  eq_hat = D2Q9::equilibrium(walls.macroscopic(i, fhat));
+        const auto  eq_hat = D2Q9::equilibrium(at(D2Q9::moments(fhat)));
         Populations out;
         for (unsigned int a = 0; a < Q; ++a)
           out[a] = fhat[a] + tau * (eq_hat[a] - feqi[a]);
@@ -203,24 +243,23 @@ namespace lbfem
   }
 
   // BGK collision of the transformed populations g (Bardow et al.),
-  // g <- g - omega (g - geq), omega = dt / (lambda + dt/2). Wall nodes: the
-  // non-equilibrium part is relaxed as everywhere else, the equilibrium part is
-  // rebuilt with the wall velocity, so that the post-collision momentum is
-  // exactly rho u_wall before streaming. Both equilibria are computed on every
-  // node and selected, which vectorizes (a branch per node does not).
+  // g <- geq + (1 - omega) (g - geq), omega = dt / (lambda + dt/2): the
+  // non-equilibrium part is relaxed, and the equilibrium part is that of the
+  // imposed velocity, so that on a wall node the post-collision momentum is
+  // exactly rho u_wall before streaming.
   inline void
   collide_bgk(BlockVectorType &g, const Walls &walls, const Number omega)
   {
     nodal_map(
       g,
-      [&](const unsigned int i, const Populations &gi) {
-        const auto  m        = D2Q9::moments(gi);
-        const auto  geq      = D2Q9::equilibrium(m);
-        const auto  geq_wall = D2Q9::equilibrium(walls.impose(i, m));
-        const bool  interior = walls.of_node[i] < 0;
+      walls,
+      [omega](const auto &at, const Populations &gi) {
+        const auto  m          = D2Q9::moments(gi);
+        const auto  geq        = D2Q9::equilibrium(m);
+        const auto  geq_target = D2Q9::equilibrium(at(m)); // = geq on fluid nodes
         Populations out;
         for (unsigned int a = 0; a < Q; ++a)
-          out[a] = interior ? gi[a] - omega * (gi[a] - geq[a]) : geq_wall[a] + (1. - omega) * (gi[a] - geq[a]);
+          out[a] = geq_target[a] + (1. - omega) * (gi[a] - geq[a]);
         return out;
       },
       g);

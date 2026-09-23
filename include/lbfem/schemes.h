@@ -129,12 +129,12 @@ namespace lbfem
     }
 
     // Reads f (9), writes feq (9), then reads f, feq, incr (9+9+8) and writes f
-    // (9), plus the wall data (index and velocity, 2.5) twice; equilibrium 122,
-    // predictor 32, equilibrium of fhat 122, corrector 27.
+    // (9); equilibrium 122, predictor 32, equilibrium of fhat 122, corrector 27
+    // (the wall nodes, O(sqrt N), are not counted).
     Work
     collision_work() const override
     {
-      return {18 + 35 + 5, 303};
+      return {18 + 35, 303};
     }
 
   private:
@@ -178,13 +178,13 @@ namespace lbfem
       return 1. + 0.5 * this->ts.dt / this->ts.lambda;
     }
 
-    // Reads and writes g (9+9), reads the wall data (index and velocity, 2.5)
-    // and adds incr to g (8+8 read, 8 write); moments 20, equilibria of the
-    // fluid and the wall velocity 2 x 102, relaxation 18, increment 8.
+    // Reads and writes g (9+9) and adds incr to g (8+8 read, 8 write); moments
+    // 20, equilibrium 102, relaxation 27, increment 8 (the wall nodes, O(sqrt
+    // N), are not counted).
     Work
     collision_work() const override
     {
-      return {18 + 2.5 + 24, 250};
+      return {18 + 24, 157};
     }
   };
 } // namespace lbfem

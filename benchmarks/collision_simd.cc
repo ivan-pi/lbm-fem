@@ -2,8 +2,9 @@
 // vector, one block per direction), two ways:
 //   library: lbfem::collide_bgk, a lambda mapped over the nodes by nodal_map
 //            (vectorized across nodes by the compiler);
-//   simd:    a hand-written C/Fortran-style loop over nodes with "omp simd",
-//            the reference for what vectorization can give.
+//   simd:    a hand-written C/Fortran-style loop over nodes with "omp simd"
+//            and a scalar loop over the wall nodes, the same algorithm: the
+//            reference for what vectorization can give.
 // Checks that both give the same populations (to rounding) and reports ns per
 // node. Built with -DLBFEM_BUILD_EXTRAS=ON;  collision_simd [n] [repetitions]
 // (the working set is 2 x 9 x 8 n bytes: in cache for small n).
@@ -21,43 +22,61 @@
 
 using namespace lbfem;
 
-// Moments, then the equilibria of the fluid velocity and of the velocity the
-// relaxation targets (the wall velocity on wall nodes), blended per node
-// instead of branched.
+// At node i of G: the moments, then the equilibria of the fluid velocity and
+// of the velocity the relaxation targets (the wall velocity (wx, wy) on a wall
+// node); the result goes to node j of Out.
+static inline void
+collide_node(const double *const *G, const std::size_t i, const double omega, const bool on_wall, const double wx,
+             const double wy, double *const *Out, const std::size_t j)
+{
+  double gi[Q], rho = 0., mx = 0., my = 0.;
+  for (unsigned int a = 0; a < Q; ++a)
+    {
+      gi[a] = G[a][i];
+      rho += gi[a];
+      mx += D2Q9::e[a][0] * gi[a];
+      my += D2Q9::e[a][1] * gi[a];
+    }
+  const double ux = mx / rho, uy = my / rho;
+  const double vx = on_wall ? wx : ux, vy = on_wall ? wy : uy;
+  const double uu = ux * ux + uy * uy, vv = vx * vx + vy * vy;
+  for (unsigned int a = 0; a < Q; ++a)
+    {
+      const double eu      = D2Q9::e[a][0] * ux + D2Q9::e[a][1] * uy;
+      const double ev      = D2Q9::e[a][0] * vx + D2Q9::e[a][1] * vy;
+      const double geq     = D2Q9::w[a] * rho * (1. + 3. * eu + 4.5 * eu * eu - 1.5 * uu);
+      const double gtarget = D2Q9::w[a] * rho * (1. + 3. * ev + 4.5 * ev * ev - 1.5 * vv);
+      Out[a][j]            = gtarget + (1. - omega) * (gi[a] - geq);
+    }
+}
+
+// The wall nodes into a buffer (before g is overwritten), all nodes as fluid
+// nodes with "omp simd", then the wall nodes from the buffer.
 void
 collide_simd(BlockVectorType &g, const Walls &walls, const double omega)
 {
-  const std::size_t n = g.block(0).locally_owned_size();
-  double           *G[Q];
+  const std::size_t n = g.block(0).locally_owned_size(), n_wall = walls.nodes.size();
+  double           *G[Q], *W[Q];
+  std::vector<double> buffer(Q * n_wall);
   for (unsigned int a = 0; a < Q; ++a)
-    G[a] = g.block(a).begin();
-  const int *const    W  = walls.of_node.data();
-  const double *const WX = walls.ux.data(), *const WY = walls.uy.data();
+    {
+      G[a] = g.block(a).begin();
+      W[a] = buffer.data() + a * n_wall;
+    }
+  for (std::size_t k = 0; k < n_wall; ++k)
+    {
+      const auto [wx, wy] = walls.at(k);
+      collide_node(G, walls.nodes[k], omega, true, wx, wy, W, k);
+    }
 #pragma omp simd
   for (std::size_t i = 0; i < n; ++i)
-    {
-      double gi[Q], rho = 0., mx = 0., my = 0.;
-      for (unsigned int a = 0; a < Q; ++a)
-        {
-          gi[a] = G[a][i];
-          rho += gi[a];
-          mx += D2Q9::e[a][0] * gi[a];
-          my += D2Q9::e[a][1] * gi[a];
-        }
-      const double ux = mx / rho, uy = my / rho;
-      const bool   on_wall = W[i] >= 0;
-      const double vx = on_wall ? WX[i] : ux, vy = on_wall ? WY[i] : uy;
-      const double uu = ux * ux + uy * uy, vv = vx * vx + vy * vy;
-      for (unsigned int a = 0; a < Q; ++a)
-        {
-          const double eu      = D2Q9::e[a][0] * ux + D2Q9::e[a][1] * uy;
-          const double ev      = D2Q9::e[a][0] * vx + D2Q9::e[a][1] * vy;
-          const double geq     = D2Q9::w[a] * rho * (1. + 3. * eu + 4.5 * eu * eu - 1.5 * uu);
-          const double gtarget = D2Q9::w[a] * rho * (1. + 3. * ev + 4.5 * ev * ev - 1.5 * vv);
-          G[a][i] = on_wall ? gtarget + (1. - omega) * (gi[a] - geq) : gi[a] - omega * (gi[a] - geq);
-        }
-    }
+    collide_node(G, i, omega, false, 0., 0., G, i);
+  for (unsigned int a = 0; a < Q; ++a)
+    for (std::size_t k = 0; k < n_wall; ++k)
+      G[a][walls.nodes[k]] = W[a][k];
 }
+
+
 
 int
 main(int argc, char **argv)

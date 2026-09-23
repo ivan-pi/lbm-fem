@@ -1,7 +1,9 @@
-// Wall time per stage of a time step, both as TimerOutput sections (for the
-// summary table) and as accumulated Timers (for a traffic or flop model).
+// Wall time per stage of a time step (for a traffic or flop model). The timers
+// are local to each MPI rank: timing a stage adds no synchronization to the
+// time loop. Reduce the totals over ranks once, at the end (max_wall_times).
 #pragma once
 
+#include <deal.II/base/mpi.h>
 #include <deal.II/base/timer.h>
 
 #include <array>
@@ -21,23 +23,19 @@ namespace lbfem
       mass,      // mass-matrix solves
       n_stages
     };
-    static constexpr std::array<const char *, n_stages> names = {
-      {"1 collision (nodal)", "2 advection (cell/face loop)", "3 mass solves"}};
 
-    explicit StageTimers(dealii::TimerOutput &output)
-      : output(output)
+    StageTimers()
     {
       for (auto &t : timers)
         t.stop();
     }
 
-    // Times its lifetime in both the TimerOutput section and the stage Timer.
+    // Times its lifetime in the stage timer.
     class Scope
     {
     public:
       Scope(StageTimers &st, const Stage stage)
-        : section(st.output, names[stage])
-        , timer(st.timers[stage])
+        : timer(st.timers[stage])
       {
         timer.start();
       }
@@ -47,8 +45,7 @@ namespace lbfem
       }
 
     private:
-      dealii::TimerOutput::Scope section;
-      dealii::Timer             &timer;
+      dealii::Timer &timer;
     };
 
     // Runs fn() within the given stage and returns its result.
@@ -60,6 +57,7 @@ namespace lbfem
       return std::invoke(std::forward<F>(fn));
     }
 
+    // The accumulated time of each stage on this rank.
     double
     wall_time(const Stage stage) const
     {
@@ -67,7 +65,6 @@ namespace lbfem
     }
 
   private:
-    dealii::TimerOutput                   &output;
     std::array<dealii::Timer, n_stages> timers;
   };
 } // namespace lbfem
