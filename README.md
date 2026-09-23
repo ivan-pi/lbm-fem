@@ -128,8 +128,10 @@ made once per sweep; the physics at a quadrature point or node is a lambda that
 the compiler inlines into the loops. Against the hand-written kernels of the
 original single-file solver, the instruction counts (valgrind) of the
 advection kernels agree to 0.12 %. The nodal loop (`nodal_map`) is vectorized
-across nodes, which makes the collision 1.7-2.4 times faster
-(`benchmarks/collision_simd`); the results then agree with the scalar
+across nodes, which makes the collision 1.7-2.4 times faster; the wall nodes,
+$`O(\sqrt{N})`$, are computed apart, so that the loop reads no wall data, and
+it then runs as fast as a hand-written `omp simd` loop of the same algorithm
+(within 6 %, `benchmarks/collision_simd`). The results agree with the scalar
 original to rounding (populations to ~1e-15 relative with lumped mass, to
 within the CG tolerance otherwise; the printed diagnostics except the ~1e-13
 mass drift are identical). New drivers are added in
