@@ -125,19 +125,12 @@ built on it. Each header is a piece a driver can pull in on its own:
 A driver adds a flow by implementing `TestCase` and can exchange the advective
 part by passing its own `AdvectionOperator` to a scheme. The virtual calls are
 made once per sweep; the physics at a quadrature point or node is a lambda that
-the compiler inlines into the loops. Against the hand-written kernels of the
-original single-file solver, the instruction counts (valgrind) of the
-advection kernels agree to 0.12 %. The nodal loop (`nodal_map`) is vectorized
-across nodes, which makes the collision 1.7-2.4 times faster; the wall nodes,
-$`O(\sqrt{N})`$, are computed apart, so that the loop reads no wall data, and
-it then runs as fast as a hand-written `omp simd` loop of the same algorithm
-(within 6 %, `benchmarks/collision_simd`). The results agree with the scalar
-original to rounding (populations to ~1e-15 relative with lumped mass, to
-within the CG tolerance otherwise; the printed diagnostics except the ~1e-13
-mass drift are identical). New drivers are added in
-`CMakeLists.txt` with `lbfem_add_driver(name sources...)`; the library itself
-is the interface target `lbfem` (include path and C++20), for projects that
-pull this repository in with `add_subdirectory`.
+the compiler inlines into the loops. The nodal loop (`nodal_map`) is vectorized
+across nodes; the wall nodes, $`O(\sqrt{N})`$, are computed apart, so that the
+loop reads no wall data (measurements: [docs/performance.md](docs/performance.md)).
+New drivers are added in `CMakeLists.txt` with `lbfem_add_driver(name
+sources...)`; the library itself is the interface target `lbfem` (include path
+and C++20), for projects that pull this repository in with `add_subdirectory`.
 
 ### Matrix-free realisation
 
@@ -233,7 +226,8 @@ extrapolation of the previous increments.
 * `--cfl` is $`\Delta t |e_x| / h_{min}`$.
 * `--fused` runs the vector updates of CG and of the Richardson passes inside
   the cell loop of the mass operator (see *Profiling* below); off by default,
-  since it only pays off for higher degrees on large meshes.
+  since it only pays off for higher degrees on large meshes
+  ([docs/performance.md](docs/performance.md)).
 * A list of Reynolds numbers is run as a continuation, each starting from the
   previous steady state. The cavity stops when the mean velocity change per
   $`t_{ref}`$ drops below `--steady-tol` (default $`10^{-4} U_0`$). If that does not
@@ -798,42 +792,15 @@ price of more steps; at a given error the higher degree still wins here.
 
   With `--fused`, the vector updates and reductions of CG (deal.II's `SolverCG`
   detects the `vmult` of `StreamingMatrix` that takes operations on ranges of
-  the vectors) and of the Richardson passes run inside the cell loop, on each
-  range of entries just before the loop first touches it and just after it
-  last does, with $`Ap`$ or $`Mx`$ still in cache. Two findings:
-
-  - The preconditioner must not offer a per-entry `apply()`. `DiagonalMatrix`
-    does, and then `SolverCG` takes a path that preconditions lane by lane
-    into a SIMD register; with SIMD width 2 (deal.II 9.7.1) its vector
-    updates cost ~9 ns per entry and iteration, in or out of cache and
-    whatever the degree, against 2-7 ns unfused (at width 1 there is no
-    penalty). The fused CG therefore gets a Jacobi with `apply_to_subrange()`
-    only (`RangeJacobi`), which preconditions blocks of 128 entries; its
-    updates then cost 2.4-5.3 ns. Details and a reproducer:
-    [docs/dealii-fused-cg.md](docs/dealii-fused-cg.md).
-  - Fusing saves the memory traffic of the vector updates, which is a small
-    part of an iteration unless the operator is cheap per dof and the vectors
-    are out of cache. A $`Q_1`$ mass `vmult` costs 25-35 ns per dof with SSE2
-    (~60 ns without SIMD), a $`Q_4`$ one 5-10 ns.
-
-  `lbfem::MassSolver`, ns per dof and iteration, unfused → fused, in the
-  `dealii/dealii:v9.7.1-noble` container (SSE2):
-
-  | | CG with $`M`$ | CG with TG3 | Richardson |
-  |---|---|---|---|
-  | $`Q_1`$, $`1.7 \cdot 10^4`$ dofs | 28.2 → 31.8 | 47.1 → 50.4 | 26.7 → 26.7 |
-  | $`Q_1`$, $`2.6 \cdot 10^5`$ dofs | 32.3 → 32.8 | 51.1 → 52.9 | 29.7 → 28.6 |
-  | $`Q_1`$, $`4.2 \cdot 10^6`$ dofs | 36.6 → 35.6 | 57.2 → 55.8 | 33.4 → 31.5 |
-  | $`Q_2`$, $`4.2 \cdot 10^6`$ dofs | 22.0 → 18.5 | 27.8 → 24.2 | 15.8 → 13.6 |
-  | $`Q_4`$, $`2.6 \cdot 10^5`$ dofs | 9.6 → 9.4 | 14.6 → 15.3 | 7.2 → 6.3 |
-  | $`Q_4`$, $`4.2 \cdot 10^6`$ dofs | 15.7 → 11.5 | 20.2 → 16.7 | 10.9 → 8.1 |
-
-  Without SIMD (the Ubuntu package, where both preconditioner paths are
-  equally fast) $`Q_1`$ is within ±4 %, $`Q_2`$ at
-  $`4.2 \cdot 10^6`$ dofs 9-13 % faster. In cgdbe runs, whose warm-started CG
-  takes 1.5-17 iterations per solve, the step time changes by -6 % to +12 %
-  up to $`10^6`$ dofs, so `--fused` is off by default; it is for higher degrees
-  and meshes well beyond the cache.
+  the vectors) and of the Richardson passes (`PreconditionRelaxation`) run
+  inside the cell loop, on each range of entries just before the loop first
+  touches it and just after it last does, with $`Ap`$ or $`Mx`$ still in cache.
+  The Jacobi preconditioner of the fused CG offers `apply_to_subrange()` only
+  (`RangeJacobi`): with `DiagonalMatrix` itself, `SolverCG` preconditions lane
+  by lane, which is slower than the updates it fuses
+  ([docs/dealii-fused-cg.md](docs/dealii-fused-cg.md)). Whether fusing pays
+  off depends on the degree and the mesh size
+  ([docs/performance.md](docs/performance.md)).
 
   The roofline itself is measured, not assumed (`benchmarks/roofline.cc`, one core):
 
@@ -870,8 +837,7 @@ price of more steps; at a given error the higher degree still wins here.
   rest. Its 12 GB/s is 40 % of the in-place pattern roofline. Vectorising the
   nodal loop across nodes (AVX-512, 8 lanes) would raise the ceiling to about
   80 GFlop/s and make the collision bandwidth-bound at ≈ 31 GB/s / 144 B =
-  0.2 GNUPS. (Since done, with 4-lane AVX2, which GCC prefers here: 7 ns per
-  node in cache, 9 ns and 16 GB/s out of cache, against 17 and 15 ns before.) The advection loop has an intensity of 11 flop/byte — far on the
+  0.2 GNUPS (since done: [docs/performance.md](docs/performance.md)). The advection loop has an intensity of 11 flop/byte — far on the
   compute side — and still reaches only 2.8 GFlop/s, 28 % of scalar peak, which
   confirms that its cost is instruction overhead around the arithmetic (see
   below), not flops and not bytes.
