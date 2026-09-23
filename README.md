@@ -220,7 +220,7 @@ vortex positive, as in Table I of Lee & Lin):
 Options: `--case tgv|couette|cavity --scheme leelin|bardow --mass cg|lumped|richardson[k]
 --streaming tg2|tg3|tg3-split --refine n | --cells N --mach Ma --modes n1,n2
 --reynolds Re[,Re...] --cfl c --tend t --steps n --stretch gamma --distort eps
---steady-tol eps --cg-tol eps --checkpoint name --restart name --no-output`.
+--steady-tol eps --cg-tol eps --fused --checkpoint name --restart name --no-output`.
 Defaults: `bardow`, `cg`, `tg2`. `--streaming tg3*` requires `bardow` and `cg`.
 The wall treatment is fixed per scheme (see above); the CG solves start from the
 extrapolation of the previous increments.
@@ -229,6 +229,9 @@ extrapolation of the previous increments.
   for `tgv`, the diffusion time $`L^2/\nu`$ for `couette`, the lid time $`L/U_0`$ for
   `cavity`.
 * `--cfl` is $`\Delta t |e_x| / h_{min}`$.
+* `--fused` runs the vector updates of CG and of the Richardson passes inside
+  the cell loop of the mass operator (see *Profiling* below); off by default,
+  since it is slower for $`Q_1`$.
 * A list of Reynolds numbers is run as a continuation, each starting from the
   previous steady state. The cavity stops when the mean velocity change per
   $`t_{ref}`$ drops below `--steady-tol` (default $`10^{-4} U_0`$). If that does not
@@ -776,10 +779,8 @@ price of more steps; at a given error the higher degree still wins here.
   model (every vector read or written once per pass, no cache reuse): `bardow`
   collision 42 vector passes (collide in place 9+9, add the increment 8+8+8),
   advection 16 (read 8, write 8), lumped mass 16; `leelin` collision 53, advection
-  24 (it also reads $`f^{eq}`$); CG 8 passes per iteration plus 4, Richardson 3 plus
-  5 per pass (their vector updates run inside the cell loop of the operator, on
-  each range of entries just before and after the loop touches it, with
-  $`A p`$ and $`M x`$ still in cache). A vector pass is
+  24 (it also reads $`f^{eq}`$); CG 10 passes per iteration plus 4, Richardson 3
+  plus 11 per pass (with `--fused` 8 and 5, see below). A vector pass is
   $`8 N_{nodes}`$ bytes. On this VM a numpy copy runs at 14 GB/s, a triad at 8 GB/s.
   The stage times are accumulated per MPI rank, without synchronizing the time
   loop, and the summary shows their maximum over the ranks.
@@ -789,8 +790,28 @@ price of more steps; at a given error the higher degree still wins here.
   per node (moments 20, equilibrium 102, relaxation 27, increment 8), `leelin`
   303; advection 184 flops per cell and population for $`Q_1`$ on a cartesian cell
   (sum-factorised gradients 72, quadrature 24, integration 88), i.e. 1461 per
-  node and step for 8 populations; mass vmult 68 per cell, CG 21 per node and
-  iteration on top (updates and 7 reductions); lumped 1.
+  node and step for 8 populations; mass vmult 68 per cell, CG 11 per node and
+  iteration on top (21 with `--fused`: 7 reductions); lumped 1.
+
+  With `--fused`, the vector updates and reductions of CG (deal.II's `SolverCG`
+  detects the `vmult` of `StreamingMatrix` that takes operations on ranges of
+  the vectors) and of the Richardson passes run inside the cell loop, on each
+  range of entries just before the loop first touches it and just after it
+  last does, with $`Ap`$ or $`Mx`$ still in cache. That saves memory traffic,
+  which only pays off where the operator is memory-bound. A mass `vmult` costs
+  ~40 ns per dof for $`Q_1`$ in the `dealii/dealii:v9.7.1-noble` container (SSE2)
+  and ~70 ns without SIMD, the vector updates of a CG iteration a few ns; 15
+  iterations from zero (Taylor-Green mesh, ms, best of 7, container):
+
+  | | unfused | fused |
+  |---|---|---|
+  | $`Q_1`$, $`263 \cdot 10^3`$ dofs, CG with $`M`$ / TG3 / Richardson | 154 / 299 / 150 | 205 / 309 / 176 |
+  | $`Q_1`$, $`4.2 \cdot 10^6`$ dofs (10 iterations) | 2088 / 3360 / 1778 | 2262 / 3330 / 2088 |
+  | $`Q_2`$, $`263 \cdot 10^3`$ dofs | 77 / 123 / 65 | 108 / 140 / 64 |
+  | $`Q_2`$, $`4.2 \cdot 10^6`$ dofs (10 iterations) | 1148 / 1621 / 865 | 1096 / 1542 / 827 |
+
+  So it is off by default; expect it to help for higher degrees, meshes well
+  beyond the cache and wider SIMD (AVX2/AVX-512 builds of deal.II).
 
   The roofline itself is measured, not assumed (`benchmarks/roofline.cc`, one core):
 

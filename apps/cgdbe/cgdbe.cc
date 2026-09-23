@@ -159,6 +159,7 @@ options()
     {"--distort", "eps", [](auto &p, const auto &v) { p.distort = std::stod(v); }},
     {"--steady-tol", "eps", [](auto &p, const auto &v) { p.steady_tol = std::stod(v); }},
     {"--cg-tol", "eps", [](auto &p, const auto &v) { p.stream.mass.cg_tolerance = std::stod(v); }},
+    {"--fused", "", [](auto &p, const auto &) { p.stream.mass.fused = true; }},
     {"--checkpoint", "name", [](auto &p, const auto &v) { p.checkpoint = v; }},
     {"--restart", "name", [](auto &p, const auto &v) { p.restart = v; }},
     {"--no-output", "", [](auto &p, const auto &) { p.output = false; }},
@@ -310,6 +311,7 @@ CGDBE::setup()
             prm.stream.mass.type == Mass::cg     ? "consistent (CG + Jacobi, extrapolated start)" :
                                                    "lumped + " + std::to_string(prm.stream.mass.richardson) +
                                                      " Richardson pass(es)")
+        << (prm.stream.mass.fused && prm.stream.mass.type != Mass::lumped ? ", vector updates fused" : "")
         << "\n  Ma = " << prm.mach << ", dt = " << dt << " (CFL " << dt / disc.h_min << ")\n";
 }
 

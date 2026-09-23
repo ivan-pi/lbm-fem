@@ -1,10 +1,11 @@
 // Solves with the matrix of the Taylor-Galerkin streaming step, the mass
 // matrix M or the left-hand side M + dt^2/6 K_e of the third-order scheme
 // (TG3): consistent (CG with Jacobi preconditioner), row-sum lumped, or lumped
-// with k Richardson passes (Donea's iterated lumping). The vector operations of
-// CG and of the Richardson passes run inside the cell loop of the operator, on
-// each range of entries just before the loop first touches it and just after
-// it last does, so that an iteration passes through memory about once.
+// with k Richardson passes (Donea's iterated lumping). With
+// MassSettings::fused, the vector operations of CG and of the Richardson
+// passes run inside the cell loop of the operator, on each range of entries
+// just before the loop first touches it and just after it last does, so that
+// an iteration passes through memory about once.
 #pragma once
 
 #include <deal.II/lac/solver_cg.h>
@@ -39,6 +40,12 @@ namespace lbfem
     // start needs about 25 iterations at the default tolerance and 38 at
     // 1e-12, from 32^2 to 512^2 cells (the extrapolated start, 2-16).
     unsigned int cg_max_iterations = 200;
+    // CG and Richardson: vector updates inside the cell loop. This saves memory
+    // traffic, and pays off where the operator is memory-bound: out of cache,
+    // higher degree, wide SIMD (Q2 at 4M dofs: 5-10 % faster). The Q1 operator
+    // is not (a vmult costs ~40 ns per dof with SSE2), and there fusing is up
+    // to a third slower (see README).
+    bool fused = false;
   };
 
   // The matrix A = M + c K_e of the streaming step: the mass matrix for c = 0,
@@ -137,6 +144,21 @@ namespace lbfem
 
 
 
+  // A matrix without the range operations of its vmult: SolverCG then runs
+  // its classic iteration.
+  template <typename Matrix>
+  struct Unfused
+  {
+    void
+    vmult(VectorType &dst, const VectorType &src) const
+    {
+      A.vmult(dst, src);
+    }
+    const Matrix &A;
+  };
+
+
+
   template <int fe_degree>
   class MassSolver
   {
@@ -166,43 +188,56 @@ namespace lbfem
             break;
 
           case Mass::richardson: // x_0 = M_L^{-1} r, x_{j+1} = x_j + M_L^{-1} (r - M x_j)
-            {
-              DL.vmult(x, r);
-              const StreamingMatrix<fe_degree> M(*disc.matrix_free);
-              const Number *const              dl = DL.get_vector().begin();
-              const Number *const              rr = r.begin();
-              Number *const                    xx = x.begin();
-              Number *const                    mx = Mx.begin();
+            DL.vmult(x, r);
+            if (settings.fused)
+              {
+                const StreamingMatrix<fe_degree> M(*disc.matrix_free);
+                const Number *const              dl = DL.get_vector().begin();
+                const Number *const              rr = r.begin();
+                Number *const                    xx = x.begin();
+                Number *const                    mx = Mx.begin();
+                for (unsigned int j = 0; j < settings.richardson; ++j)
+                  M.vmult(
+                    Mx,
+                    x,
+                    [&](const unsigned int begin, const unsigned int end) { std::fill(mx + begin, mx + end, 0.); },
+                    [&](const unsigned int begin, const unsigned int end) {
+                      for (unsigned int i = begin; i < end; ++i)
+                        xx[i] += dl[i] * (rr[i] - mx[i]);
+                    });
+              }
+            else
               for (unsigned int j = 0; j < settings.richardson; ++j)
-                M.vmult(
-                  Mx,
-                  x,
-                  [&](const unsigned int begin, const unsigned int end) {
-                    std::fill(mx + begin, mx + end, 0.);
-                  },
-                  [&](const unsigned int begin, const unsigned int end) {
-                    for (unsigned int i = begin; i < end; ++i)
-                      xx[i] += dl[i] * (rr[i] - mx[i]);
-                  });
-              // x_0: r, M_L^{-1}, x; per pass, with M x in cache between the
-              // cell loop and the update: x (read, write), M x, r, M_L^{-1}
-              vector_passes += 3 + 5. * settings.richardson;
-              flops_per_node += 1 + (flops_vmult + 3.) * settings.richardson;
-              break;
-            }
+                {
+                  disc.mass.vmult(Mx, x);
+                  Mx.sadd(-1., 1., r);
+                  DL.vmult(Mx, Mx);
+                  x += Mx;
+                }
+            // x_0: r, M_L^{-1}, x; per pass x (read, write), r, M_L^{-1} and M x:
+            // written, read and written three times, or (fused) once, in cache
+            vector_passes += 3 + (settings.fused ? 5. : 11.) * settings.richardson;
+            flops_per_node += 1 + (flops_vmult + 3.) * settings.richardson;
+            break;
 
           case Mass::cg:
             {
-              SolverControl        control(settings.cg_max_iterations, settings.cg_tolerance * r.l2_norm());
-              SolverCG<VectorType> cg(control);
-              cg.solve(StreamingMatrix<fe_degree>(*disc.matrix_free, tg3_coefficient, e), x, r,
-                       *disc.mass.get_matrix_diagonal_inverse());
+              SolverControl                    control(settings.cg_max_iterations, settings.cg_tolerance * r.l2_norm());
+              SolverCG<VectorType>             cg(control);
+              const auto                      &jacobi = *disc.mass.get_matrix_diagonal_inverse();
+              const StreamingMatrix<fe_degree> A(*disc.matrix_free, tg3_coefficient, e);
+              if (settings.fused)
+                cg.solve(A, x, r, jacobi);
+              else if (tg3_coefficient == 0.)
+                cg.solve(disc.mass, x, r, jacobi);
+              else
+                cg.solve(Unfused<StreamingMatrix<fe_degree>>{A}, x, r, jacobi);
               cg_iterations += control.last_step();
-              // per iteration, with the updates and the 7 reductions in the
-              // cell loop (A p in cache): x, r, p (read, write), A p, the Jacobi
-              // diagonal
-              vector_passes += 8. * control.last_step() + 4;
-              flops_per_node += (flops_vmult + 21.) * control.last_step();
+              // per iteration: vmult 2, Jacobi 2, updates of x, r, p 6 vector
+              // passes; fused, with A p in cache: x, r, p (read, write), A p,
+              // the Jacobi diagonal (and 7 reductions instead of 2)
+              vector_passes += (settings.fused ? 8. : 10.) * control.last_step() + 4;
+              flops_per_node += (flops_vmult + (settings.fused ? 21. : 11.)) * control.last_step();
             }
         }
     }
