@@ -49,6 +49,8 @@ function(lbfem_add_driver name)
 endfunction()
 
 lbfem_add_driver(cgdbe apps/cgdbe/cgdbe.cc)
+# The command line of the driver is parsed by CLI11, vendored in third_party/.
+target_include_directories(cgdbe SYSTEM PRIVATE ${PROJECT_SOURCE_DIR}/third_party)
 
 # Optional helpers: plain C++ micro-benchmarks (always tuned for the build
 # machine, whose peak they measure), the deal.II element-matrix check that is
