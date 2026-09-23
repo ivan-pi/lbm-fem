@@ -31,8 +31,8 @@ collide_simd(BlockVectorType &g, const Walls &walls, const double omega)
   double           *G[Q];
   for (unsigned int a = 0; a < Q; ++a)
     G[a] = g.block(a).begin();
-  const int *const W = walls.of_node.data();
-  const auto      *V = walls.velocity.data();
+  const int *const    W  = walls.of_node.data();
+  const double *const WX = walls.ux.data(), *const WY = walls.uy.data();
 #pragma omp simd
   for (std::size_t i = 0; i < n; ++i)
     {
@@ -46,8 +46,7 @@ collide_simd(BlockVectorType &g, const Walls &walls, const double omega)
         }
       const double ux = mx / rho, uy = my / rho;
       const bool   on_wall = W[i] >= 0;
-      const int    w       = on_wall ? W[i] : 0;
-      const double vx = on_wall ? V[w][0] : ux, vy = on_wall ? V[w][1] : uy;
+      const double vx = on_wall ? WX[i] : ux, vy = on_wall ? WY[i] : uy;
       const double uu = ux * ux + uy * uy, vv = vx * vx + vy * vy;
       for (unsigned int a = 0; a < Q; ++a)
         {

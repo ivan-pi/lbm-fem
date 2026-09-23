@@ -5,7 +5,7 @@ cmake_minimum_required(VERSION 3.13.4)
 find_package(deal.II 9.5 REQUIRED HINTS ${DEAL_II_DIR} ../ ../../ $ENV{DEAL_II_DIR})
 
 if(NOT DEAL_II_WITH_MPI OR NOT DEAL_II_WITH_P4EST)
-  message(FATAL_ERROR "cgdbe requires a deal.II built with MPI and p4est.")
+  message(FATAL_ERROR "lbfem requires a deal.II built with MPI and p4est.")
 endif()
 
 # A deal.II that was itself configured for C++17 (e.g. distribution packages)
@@ -31,17 +31,19 @@ set(LBFEM_DEGREE 1 CACHE STRING "Polynomial degree of the elements")
 # however, is fixed by how deal.II itself was configured.
 option(LBFEM_NATIVE "Compile with -O3 -march=native" ON)
 
-# A driver: an executable built on deal.II and the header-only lbfem library
-# (include/lbfem). Its sources see LBFEM_DEGREE as a compile definition;
-# -fopenmp-simd enables the "omp simd" loops (no OpenMP runtime).
-# (Include directories rather than target_link_libraries, whose plain and
-# keyword forms deal_ii_setup_target does not mix with.)
+# The header-only library (include/lbfem). It is linked with the plain
+# target_link_libraries signature, the one deal_ii_setup_target uses.
+add_library(lbfem INTERFACE)
+target_include_directories(lbfem INTERFACE ${PROJECT_SOURCE_DIR}/include)
+target_compile_features(lbfem INTERFACE cxx_std_20)
+
+# A driver: an executable built on deal.II and lbfem. Its sources see
+# LBFEM_DEGREE as a compile definition.
 function(lbfem_add_driver name)
   add_executable(${name} ${ARGN})
   deal_ii_setup_target(${name})
-  target_include_directories(${name} PRIVATE ${PROJECT_SOURCE_DIR}/include)
+  target_link_libraries(${name} lbfem)
   target_compile_definitions(${name} PRIVATE LBFEM_DEGREE=${LBFEM_DEGREE})
-  target_compile_options(${name} PRIVATE $<$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>>:-fopenmp-simd>)
   if(LBFEM_NATIVE)
     target_compile_options(${name} PRIVATE $<$<CONFIG:Release>:-O3 -march=native>)
   endif()
@@ -63,4 +65,6 @@ if(LBFEM_BUILD_EXTRAS)
   deal_ii_setup_target(elem)
   lbfem_add_driver(mass_preconditioners tools/mass_preconditioners.cc)
   lbfem_add_driver(collision_simd benchmarks/collision_simd.cc)
+  # its reference loop is "omp simd" (no OpenMP runtime)
+  target_compile_options(collision_simd PRIVATE $<$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>>:-fopenmp-simd>)
 endif()

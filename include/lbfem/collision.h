@@ -109,9 +109,8 @@ namespace lbfem
   // Wall nodes and their velocities, from TestCase::wall_of and wall_velocity.
   struct Walls
   {
-    template <int dim>
     void
-    reinit(const std::vector<Point<dim>> &node, const TestCase &tc)
+    reinit(const std::vector<Point<2>> &node, const TestCase &tc)
     {
       std::vector<int> wall_of_node(node.size());
       for (unsigned int i = 0; i < node.size(); ++i)

@@ -133,7 +133,9 @@ across nodes, which makes the collision 1.7-2.4 times faster
 original to rounding (populations to ~1e-15 relative with lumped mass, to
 within the CG tolerance otherwise; the printed diagnostics except the ~1e-13
 mass drift are identical). New drivers are added in
-`CMakeLists.txt` with `lbfem_add_driver(name sources...)`.
+`CMakeLists.txt` with `lbfem_add_driver(name sources...)`; the library itself
+is the interface target `lbfem` (include path and C++20), for projects that
+pull this repository in with `add_subdirectory`.
 
 ### Matrix-free realisation
 

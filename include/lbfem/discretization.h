@@ -122,14 +122,8 @@ namespace lbfem
                           data);
 
       mass.initialize(matrix_free, {0});
-      mass.compute_lumped_diagonal(); // lumped mass, Richardson passes
+      mass.compute_lumped_diagonal(); // lumped mass, Richardson passes, node_weight()
       mass.compute_diagonal();        // Jacobi preconditioner for CG
-
-      VectorType ones;
-      matrix_free->initialize_dof_vector(ones);
-      matrix_free->initialize_dof_vector(node_weight);
-      ones = 1.;
-      mass.vmult(node_weight, ones);
 
       const auto  support_points = DoFTools::map_dofs_to_support_points(mapping, dof_handler);
       const auto &owned          = dof_handler.locally_owned_dofs();
@@ -162,6 +156,13 @@ namespace lbfem
       return cfl * h_min / (fe_degree * fe_degree);
     }
 
+    // int phi_i: the row sums of M (lumped mass), a nodal quadrature weight.
+    const VectorType &
+    node_weight() const
+    {
+      return mass.get_matrix_lumped_diagonal()->get_vector();
+    }
+
     unsigned int
     n_nodes() const // locally owned
     {
@@ -191,7 +192,6 @@ namespace lbfem
     double                                    h_min      = 0.;
 
     std::vector<Point<dim>>   node;        // support point per locally owned dof
-    VectorType                node_weight; // int phi_i (row sums of M)
     std::vector<unsigned int> independent; // owned dofs that are not periodic slaves
   };
 } // namespace lbfem

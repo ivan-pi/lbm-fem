@@ -33,7 +33,7 @@ namespace lbfem
   {
   public:
     using Disc      = Discretization<fe_degree>;
-    using Advection = std::unique_ptr<AdvectionOperator<fe_degree>>;
+    using Advection = std::unique_ptr<AdvectionOperator>;
     using Settings  = StreamingSettings;
 
     virtual ~Scheme() = default;
@@ -44,7 +44,6 @@ namespace lbfem
     set_time_step(const TimeStep &time_step)
     {
       ts = time_step;
-      streaming.set_time_step(ts);
     }
 
     virtual void
@@ -95,20 +94,21 @@ namespace lbfem
   public:
     using Base = Scheme<fe_degree>;
 
-    // TG2 streaming; by default with the advection of Lee & Lin, which keeps
-    // the wall surface term as it is. A custom advection receives the
+    // TG2 streaming only; by default with the advection of Lee & Lin, which
+    // keeps the wall surface term as it is. A custom advection receives the
     // equilibria in AdvectionInput::feq.
-    LeeLin(const typename Base::Disc &disc,
-           const Walls               &walls,
-           const MassSettings        &mass,
-           StageTimers               &timers,
-           typename Base::Advection   advection = nullptr)
+    LeeLin(const typename Base::Disc     &disc,
+           const Walls                   &walls,
+           const typename Base::Settings &settings,
+           StageTimers                   &timers,
+           typename Base::Advection       advection = nullptr)
       : Base(disc,
              walls,
-             {.streaming = Streaming::tg2, .mass = mass},
+             settings,
              advection ? std::move(advection) : std::make_unique<LeeLinAdvection<fe_degree>>(disc),
              timers)
     {
+      AssertThrow(settings.streaming == Streaming::tg2, ExcMessage("LeeLin streams with TG2 only"));
       disc.initialize(feq, Q);
     }
 
@@ -116,7 +116,7 @@ namespace lbfem
     step() override
     {
       this->timers.time(StageTimers::collision, [&] { compute_equilibrium(this->f, feq, this->walls); });
-      const auto &incr = this->streaming.compute_increment({.f = this->f, .feq = &feq});
+      const auto &incr = this->streaming.compute_increment({.f = this->f, .feq = &feq}, this->ts);
       this->timers.time(StageTimers::collision, [&] {
         predictor_corrector(this->f, feq, Moving{incr}, this->walls, this->ts.dt / this->ts.lambda);
       });
@@ -169,7 +169,7 @@ namespace lbfem
     {
       const auto [dt, lambda] = this->ts;
       this->timers.time(StageTimers::collision, [&] { collide_bgk(this->f, this->walls, dt / (lambda + 0.5 * dt)); });
-      this->streaming.stream(this->f);
+      this->streaming.stream(this->f, this->ts);
     }
 
     Number

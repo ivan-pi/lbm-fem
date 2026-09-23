@@ -142,7 +142,7 @@ study(const std::string &label, TestCase &tc, const unsigned int refinements)
     scheme.step();
   BlockVectorType rhs;
   disc.initialize(rhs, n_moving);
-  TaylorGalerkinAdvection<p>(disc, true).apply(rhs, {.f = scheme.f}, D2Q9::e, {.dt = dt, .lambda = tc.relaxation_time()});
+  scheme.streaming.advection_operator().apply(rhs, {.f = scheme.f}, D2Q9::e, {.dt = dt, .lambda = tc.relaxation_time()});
   const VectorType &advection = rhs.block(1); // population 2, e = (1, 1)
 
   const TG3LHS tg3(*disc.matrix_free, dt * dt / 6., {{1., 1.}});
