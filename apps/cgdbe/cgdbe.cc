@@ -28,6 +28,7 @@
 #include <deal.II/base/mpi.h>
 #include <deal.II/base/timer.h>
 
+#include <CLI11/CLI11.hpp>
 #include <lbfem/collision.h>
 #include <lbfem/d2q9.h>
 #include <lbfem/discretization.h>
@@ -42,9 +43,9 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <string>
-#include <string_view>
 #include <vector>
 
 using namespace dealii;
@@ -65,24 +66,28 @@ struct Parameters
   StreamingSettings stream; // TG2/TG3 (leelin: TG2 only) and the mass solves
   MeshSettings      mesh;   // refinements or cells per direction
 
-  double              mach     = 0.1;    // U0 / c_s
-  unsigned int        modes[2] = {1, 4}; // tgv: wave numbers k_i = 2 pi n_i / L
-  std::vector<double> reynolds;          // U0 L / nu (default 100 | 10 | 400); cavity: a list
-                                         //   "400,1000,..." continues from each steady state
-  double cfl   = 0.;                     // dt |e_x| / h_min (default 0.25; cavity 0.4 | leelin 0.5)
-  double t_end = 0.;                     // in units of t_ref (default 1 | 1 | 100):
-                                         //   tgv 1/(nu k^2), couette L^2/nu, cavity L/U0
-  double       stretch      = 1.2;       // cavity: tanh wall clustering, 0 = uniform
-  double       distort      = 0.;        // tgv: mesh distortion x += eps sin(2 pi x) sin(2 pi y)
-  double       steady_tol   = 1e-4;      // cavity: stop if mean |du|/U0 per t_ref < tol
-  unsigned int max_steps    = 0;         // > 0: fixed number of steps (benchmark)
-  unsigned int n_diagnostic = 20;        // diagnostic lines over the run
-  bool         output       = true;      // write the .dat files
-  std::string  checkpoint;               // write populations here (per rank) at every diagnostic
-  std::string  restart;                  // read initial populations from this checkpoint
+  double                      mach  = 0.1;      // U0 / c_s
+  std::array<unsigned int, 2> modes = {{1, 4}}; // tgv: wave numbers k_i = 2 pi n_i / L
+  std::vector<double>         reynolds;         // U0 L / nu (default 100 | 10 | 400); cavity: a list
+                                                //   "400,1000,..." continues from each steady state
+  double cfl   = 0.;                            // dt |e_x| / h_min (default 0.25; cavity 0.4 | leelin 0.5)
+  double t_end = 0.;                            // in units of t_ref (default 1 | 1 | 100):
+                                                //   tgv 1/(nu k^2), couette L^2/nu, cavity L/U0
+  double       stretch      = 1.2;              // cavity: tanh wall clustering, 0 = uniform
+  double       distort      = 0.;               // tgv: mesh distortion x += eps sin(2 pi x) sin(2 pi y)
+  double       steady_tol   = 1e-4;             // cavity: stop if mean |du|/U0 per t_ref < tol
+  unsigned int max_steps    = 0;                // > 0: fixed number of steps (benchmark)
+  unsigned int n_diagnostic = 20;               // diagnostic lines over the run
+  bool         output       = true;             // write the .dat files
+  std::string  checkpoint;                      // write populations here (per rank) at every diagnostic
+  std::string  restart;                         // read initial populations from this checkpoint
 
-  static Parameters
-  parse(int argc, char **argv);
+  // The command line (CLI11): the options bind to the members above; the
+  // defaults that depend on other options are filled in by finish().
+  void
+  add_options(CLI::App &app);
+  void
+  finish();
 
   std::unique_ptr<TestCase>
   make_test_case() const
@@ -96,173 +101,102 @@ struct Parameters
     AssertThrow(false, ExcMessage("--case: unknown value " + test_case));
     return nullptr;
   }
+
+private:
+  std::string mass = "cg"; // cg | lumped | richardson[k], parsed by finish()
 };
 
-
-
-// An option: its name, the form of its value ("" for a flag) and what it sets.
-struct Option
+void
+Parameters::add_options(CLI::App &app)
 {
-  std::string_view name, value;
-  void (*set)(Parameters &, const std::string &);
-};
-
-// The index of value in names, as the enum E (enumerators in the same order).
-template <typename E>
-E
-choose(const std::string_view option, const std::string &value, const std::vector<std::string_view> &names)
-{
-  const auto it = std::ranges::find(names, value);
-  AssertThrow(it != names.end(), ExcMessage(std::string(option) + ": unknown value " + value));
-  return static_cast<E>(it - names.begin());
+  app.add_option("--case", test_case, "Taylor-Green vortex (periodic), start-up Couette flow or lid-driven cavity")
+    ->option_text("tgv|couette|cavity")
+    ->check(CLI::IsMember({"tgv", "couette", "cavity"}))
+    ->capture_default_str();
+  app.add_option("--scheme", scheme, "the predictor-corrector of Lee & Lin or the collide-then-stream of Bardow")
+    ->option_text("leelin|bardow")
+    ->transform(CLI::CheckedTransformer(
+      std::map<std::string, SchemeType>{{"leelin", SchemeType::leelin}, {"bardow", SchemeType::bardow}}))
+    ->default_str("bardow");
+  app.add_option("--mass", mass, "CG on the consistent mass matrix, lumped mass, or k Richardson passes (k = 2)")
+    ->option_text("cg|lumped|richardson[k]")
+    ->check([](const std::string &v) {
+      if (v == "cg" || v == "lumped" || v == "richardson")
+        return std::string();
+      if (v.starts_with("richardson") && v.find_first_not_of("0123456789", 10) == std::string::npos)
+        return std::string();
+      return "not one of cg, lumped, richardson[k]: " + v;
+    })
+    ->capture_default_str();
+  app
+    .add_option("--streaming",
+                stream.streaming,
+                "the Taylor-Galerkin order of the streaming step (tg3* needs bardow and cg)")
+    ->option_text("tg2|tg3|tg3-split")
+    ->transform(CLI::CheckedTransformer(std::map<std::string, Streaming>{{"tg2", Streaming::tg2},
+                                                                         {"tg3", Streaming::tg3},
+                                                                         {"tg3-split", Streaming::tg3_split}}))
+    ->default_str("tg2");
+  app.add_option("--refine", mesh.refinements, "n uniform refinements: 2^n x 2^n elements")
+    ->option_text("n")
+    ->capture_default_str();
+  app.add_option("--cells", mesh.n_cells, "N x N elements instead of --refine")->option_text("N");
+  app.add_option("--mach", mach, "Mach number U0 / c_s")->option_text("Ma")->capture_default_str();
+  app.add_option("--modes", modes, "tgv: wave numbers k_i = 2 pi n_i / L")
+    ->option_text("n1,n2")
+    ->delimiter(',')
+    ->default_str("1,4");
+  app.add_option("--reynolds", reynolds, "Reynolds number(s); a list is a continuation from each steady state")
+    ->option_text("Re[,Re...]")
+    ->delimiter(',')
+    ->default_str("100 | 10 | 400");
+  app.add_option("--cfl", cfl, "dt |e_x| / h_min")->option_text("c")->default_str("0.25; cavity 0.4, with leelin 0.5");
+  app.add_option("--tend", t_end, "end time in units of t_ref: tgv 1/(nu k^2), couette L^2/nu, cavity L/U0")
+    ->option_text("t")
+    ->default_str("1; cavity 100");
+  app.add_option("--steps", max_steps, "stop after n steps (benchmark)")->option_text("n");
+  app.add_option("--stretch", stretch, "cavity: tanh wall clustering of the nodes, 0 = uniform")
+    ->option_text("gamma")
+    ->capture_default_str();
+  app.add_option("--distort", distort, "tgv: map x -> x + eps L sin(2 pi x/L) sin(2 pi y/L) (1,1)")
+    ->option_text("eps")
+    ->capture_default_str();
+  app.add_option("--steady-tol", steady_tol, "cavity: stop when the mean velocity change per t_ref is below eps U0")
+    ->option_text("eps")
+    ->capture_default_str();
+  app.add_option("--cg-tol", stream.mass.cg_tolerance, "relative tolerance of the CG mass solves")
+    ->option_text("eps")
+    ->capture_default_str();
+  app.add_flag("--fused", stream.mass.fused, "run the CG and Richardson vector updates inside the cell loop");
+  app.add_option("--checkpoint", checkpoint, "write the populations (one file per rank) at every diagnostic line")
+    ->option_text("name");
+  app.add_option("--restart", restart, "start from a checkpoint (same mesh, number of ranks and dt)")
+    ->option_text("name");
+  app.add_flag_callback("--no-output", [this]() { output = false; }, "do not write the .dat files");
+  // The help shows the value each option takes and, in brackets, its default.
+  for (CLI::Option *option : app.get_options())
+    if (!option->get_default_str().empty())
+      option->option_text(option->get_option_text() + " [" + option->get_default_str() + "]");
 }
 
-const std::vector<Option> options = {
-  {"--case",
-   "tgv|couette|cavity",
-   [](Parameters &p, const std::string &v) {
-     p.test_case = v;
-   }},
-  {"--scheme",
-   "leelin|bardow",
-   [](Parameters &p, const std::string &v) {
-     p.scheme = choose<SchemeType>("--scheme", v, {"leelin", "bardow"});
-   }},
-  {"--mass",
-   "cg|lumped|richardson[k]",
-   [](Parameters &p, const std::string &v) {
-     if (v.starts_with("richardson"))
-       {
-         p.stream.mass.type = Mass::richardson;
-         if (v.size() > 10)
-           p.stream.mass.richardson = std::stoul(v.substr(10));
-       }
-     else
-       p.stream.mass.type = choose<Mass>("--mass", v, {"cg", "lumped"});
-   }},
-  {"--streaming",
-   "tg2|tg3|tg3-split",
-   [](Parameters &p, const std::string &v) {
-     p.stream.streaming = choose<Streaming>("--streaming", v, {"tg2", "tg3", "tg3-split"});
-   }},
-  {"--refine",
-   "n",
-   [](Parameters &p, const std::string &v) {
-     p.mesh.refinements = std::stoul(v);
-   }},
-  {"--cells",
-   "N",
-   [](Parameters &p, const std::string &v) {
-     p.mesh.n_cells = std::stoul(v);
-   }},
-  {"--mach",
-   "Ma",
-   [](Parameters &p, const std::string &v) {
-     p.mach = std::stod(v);
-   }},
-  {"--modes",
-   "n1,n2",
-   [](Parameters &p, const std::string &v) {
-     const auto n = Utilities::string_to_int(Utilities::split_string_list(v));
-     AssertThrow(n.size() == 2 && n[0] >= 0 && n[1] >= 0, ExcMessage("--modes n1,n2"));
-     p.modes[0] = n[0];
-     p.modes[1] = n[1];
-   }},
-  {"--reynolds",
-   "Re[,Re..]",
-   [](Parameters &p, const std::string &v) {
-     const auto list = Utilities::string_to_double(Utilities::split_string_list(v));
-     p.reynolds.insert(p.reynolds.end(), list.begin(), list.end());
-   }},
-  {"--cfl",
-   "c",
-   [](Parameters &p, const std::string &v) {
-     p.cfl = std::stod(v);
-   }},
-  {"--tend",
-   "t/t_ref",
-   [](Parameters &p, const std::string &v) {
-     p.t_end = std::stod(v);
-   }},
-  {"--steps",
-   "n",
-   [](Parameters &p, const std::string &v) {
-     p.max_steps = std::stoul(v);
-   }},
-  {"--stretch",
-   "gamma",
-   [](Parameters &p, const std::string &v) {
-     p.stretch = std::stod(v);
-   }},
-  {"--distort",
-   "eps",
-   [](Parameters &p, const std::string &v) {
-     p.distort = std::stod(v);
-   }},
-  {"--steady-tol",
-   "eps",
-   [](Parameters &p, const std::string &v) {
-     p.steady_tol = std::stod(v);
-   }},
-  {"--cg-tol",
-   "eps",
-   [](Parameters &p, const std::string &v) {
-     p.stream.mass.cg_tolerance = std::stod(v);
-   }},
-  {"--fused",
-   "",
-   [](Parameters &p, const std::string &) {
-     p.stream.mass.fused = true;
-   }},
-  {"--checkpoint",
-   "name",
-   [](Parameters &p, const std::string &v) {
-     p.checkpoint = v;
-   }},
-  {"--restart",
-   "name",
-   [](Parameters &p, const std::string &v) {
-     p.restart = v;
-   }},
-  {"--no-output",
-   "",
-   [](Parameters &p, const std::string &) {
-     p.output = false;
-   }},
-};
-
-Parameters
-Parameters::parse(int argc, char **argv)
+void
+Parameters::finish()
 {
-  const auto usage = [] {
-    std::string text = "options:";
-    for (const auto &[name, value, set] : options)
-      text += " " + std::string(name) + (value.empty() ? "" : " " + std::string(value));
-    return text;
-  };
-
-  Parameters prm;
-  for (int i = 1; i < argc; ++i)
+  if (mass.starts_with("richardson"))
     {
-      const std::string_view key = argv[i];
-      const auto             opt = std::ranges::find(options, key, &Option::name);
-      AssertThrow(opt != options.end(), ExcMessage("unknown option " + std::string(key) + "\n" + usage()));
-      std::string value;
-      if (!opt->value.empty())
-        {
-          AssertThrow(i + 1 < argc, ExcMessage("missing value for " + std::string(key)));
-          value = argv[++i];
-        }
-      opt->set(prm, value);
+      stream.mass.type = Mass::richardson;
+      if (mass.size() > 10)
+        stream.mass.richardson = std::stoul(mass.substr(10));
     }
-  const bool cavity = prm.test_case == "cavity";
-  if (prm.reynolds.empty())
-    prm.reynolds = {prm.test_case == "tgv" ? 100. : cavity ? 400. : 10.};
-  if (prm.cfl <= 0.)
-    prm.cfl = !cavity ? 0.25 : (prm.scheme == SchemeType::leelin ? 0.5 : 0.4);
-  if (prm.t_end <= 0.)
-    prm.t_end = cavity ? 100. : 1.;
-  return prm;
+  else
+    stream.mass.type = mass == "cg" ? Mass::cg : Mass::lumped;
+  const bool cavity = test_case == "cavity";
+  if (reynolds.empty())
+    reynolds = {test_case == "tgv" ? 100. : cavity ? 400. : 10.};
+  if (cfl <= 0.)
+    cfl = !cavity ? 0.25 : (scheme == SchemeType::leelin ? 0.5 : 0.4);
+  if (t_end <= 0.)
+    t_end = cavity ? 100. : 1.;
 }
 
 // ---------------------------------- driver -----------------------------------
@@ -540,7 +474,7 @@ private:
   // Stepping time, throughput and, per stage, the effective bandwidth of a
   // single-pass traffic model (every vector read or written once per pass, no
   // cache reuse; a vector pass is 8 N_nodes bytes) and the rate of a flop model
-  // (a multiply-add counts 2); see README. The times are the maxima over the
+  // (a multiply-add counts 2); see docs/method.md. The times are the maxima over the
   // ranks; the work is per node and step.
   void
   print_summary(const double stepping_seconds) const
@@ -596,7 +530,8 @@ private:
             << " flops per node and step, intensity " << std::setprecision(2) << w.flops / (w.passes * sizeof(Number))
             << " flop/byte)" << std::defaultfloat << "\n";
     };
-    pcout << "  breakdown of the time stepping (max over ranks; single-pass traffic model, flop model, see README):\n";
+    pcout
+      << "  breakdown of the time stepping (max over ranks; single-pass traffic model, flop model, see docs/method.md):\n";
     stage("collision", t[S::collision], collision);
     stage("advection", t[S::advection], advection);
     stage("mass solves", t[S::mass], solve_work);
@@ -631,7 +566,21 @@ main(int argc, char **argv)
   try
     {
       Utilities::MPI::MPI_InitFinalize mpi(argc, argv, /*threads*/ 1);
-      if (!CGDBE(Parameters::parse(argc, argv)).run())
+      Parameters                       prm;
+      CLI::App app("cgdbe: characteristic Galerkin discrete Boltzmann solver, D2Q9 with Q" + std::to_string(fe_degree) +
+                     " elements (lbfem)",
+                   "cgdbe");
+      prm.add_options(app);
+      try
+        {
+          app.parse(argc, argv);
+        }
+      catch (const CLI::ParseError &e) // --help, or a bad command line
+        {
+          return Utilities::MPI::this_mpi_process(MPI_COMM_WORLD) == 0 ? app.exit(e) : e.get_exit_code();
+        }
+      prm.finish();
+      if (!CGDBE(prm).run())
         return 2;
     }
   catch (const std::exception &exc)

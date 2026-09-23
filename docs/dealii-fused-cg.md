@@ -107,7 +107,7 @@ struct RangeJacobi
 
 (`include/lbfem/mass.h`). With it, fused CG with a matrix-free mass operator
 is 13-27 % faster than unfused for Q2/Q4 at 4.2M dofs, and within a few % for
-Q1 (see the README, *Profiling*).
+Q1 (see [performance.md](performance.md)).
 
 ## Possible fixes in deal.II
 
