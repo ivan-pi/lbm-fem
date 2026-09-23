@@ -223,7 +223,7 @@ private:
   void
   write_gnuplot(const std::string &name);
   void
-  print_summary(const double seconds) const;
+  print_summary(const double stepping_seconds) const;
 
   const Parameters          prm;
   std::unique_ptr<TestCase> tc;
@@ -556,17 +556,9 @@ CGDBE::run()
 void
 CGDBE::print_summary(const double stepping_seconds) const
 {
-  // stepping, collision, advection, mass solves, other
-  std::vector<double> t(5);
-  t[0] = stepping_seconds;
-  t[4] = stepping_seconds;
-  for (const auto s : {StageTimers::collision, StageTimers::advection, StageTimers::mass})
-    {
-      t[1 + s] = stage_timers.wall_time(s);
-      t[4] -= t[1 + s];
-    }
-  Utilities::MPI::max(t, comm, t);
-  const double seconds = t[0];
+  using S              = StageTimers;
+  const auto   t       = stage_timers.max_wall_times(stepping_seconds, comm);
+  const double seconds = Utilities::MPI::max(stepping_seconds, comm);
 
   const double nodes   = disc.dof_handler.n_dofs();
   const auto  &mass    = scheme->streaming.mass_solver();
@@ -594,10 +586,10 @@ CGDBE::print_summary(const double stepping_seconds) const
           << flops / (passes * sizeof(Number)) << " flop/byte)" << std::defaultfloat << "\n";
   };
   pcout << "  breakdown of the time stepping (max over ranks; single-pass traffic model, flop model, see README):\n";
-  stage("collision", t[1], collision.vector_passes, collision.flops);
-  stage("advection", t[2], advection.vector_passes, advection.flops);
-  stage("mass solves", t[3], mass.vector_passes / total_steps, mass.flops_per_node / total_steps);
-  pcout << "  other (timers, loop overhead): " << std::fixed << std::setprecision(3) << t[4] << " s"
+  stage("collision", t[S::collision], collision.vector_passes, collision.flops);
+  stage("advection", t[S::advection], advection.vector_passes, advection.flops);
+  stage("mass solves", t[S::mass], mass.vector_passes / total_steps, mass.flops_per_node / total_steps);
+  pcout << "  other (timers, loop overhead): " << std::fixed << std::setprecision(3) << t[S::n_stages] << " s"
         << std::defaultfloat << "\n";
 }
 

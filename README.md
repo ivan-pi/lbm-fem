@@ -782,7 +782,8 @@ price of more steps; at a given error the higher degree still wins here.
   collision 42 vector passes (collide in place 9+9, add the increment 8+8+8),
   advection 16 (read 8, write 8), lumped mass 16; `leelin` collision 53, advection
   24 (it also reads $`f^{eq}`$); CG 10 passes per iteration plus 4, Richardson 3
-  plus 11 per pass (with `--fused` 8 and 5, see below). A vector pass is
+  plus 7 per pass (with `--fused` 8 and 5, see below; the passes are deal.II's
+  `PreconditionRelaxation`). A vector pass is
   $`8 N_{nodes}`$ bytes. On this VM a numpy copy runs at 14 GB/s, a triad at 8 GB/s.
   The stage times are accumulated per MPI rank, without synchronizing the time
   loop, and the summary shows their maximum over the ranks.
@@ -807,7 +808,7 @@ price of more steps; at a given error the higher degree still wins here.
     updates cost ~9 ns per entry and iteration, in or out of cache and
     whatever the degree, against 2-7 ns unfused (at width 1 there is no
     penalty). The fused CG therefore gets a Jacobi with `apply_to_subrange()`
-    only (`BlockJacobi`), which preconditions blocks of 128 entries; its
+    only (`RangeJacobi`), which preconditions blocks of 128 entries; its
     updates then cost 2.4-5.3 ns. Details and a reproducer:
     [docs/dealii-fused-cg.md](docs/dealii-fused-cg.md).
   - Fusing saves the memory traffic of the vector updates, which is a small

@@ -9,6 +9,7 @@
 #pragma once
 
 #include <deal.II/lac/diagonal_matrix.h>
+#include <deal.II/lac/precondition.h>
 #include <deal.II/lac/solver_cg.h>
 #include <deal.II/lac/solver_control.h>
 
@@ -17,9 +18,9 @@
 
 #include <lbfem/discretization.h>
 
-#include <algorithm>
 #include <cstddef>
 #include <functional>
+#include <type_traits>
 
 namespace lbfem
 {
@@ -49,6 +50,13 @@ namespace lbfem
     bool fused = false;
   };
 
+  // What deal.II's solvers and preconditioners keep a checked pointer to.
+#if DEAL_II_VERSION_GTE(9, 7, 0)
+  using Observable = EnableObserverPointer;
+#else
+  using Observable = Subscriptor;
+#endif
+
   // The matrix A = M + c K_e of the streaming step: the mass matrix for c = 0,
   // and for c = dt^2/6 the left-hand side of the third-order Taylor-Galerkin
   // step (Donea 1984)
@@ -56,7 +64,7 @@ namespace lbfem
   // K_e = int (e.grad N)(e.grad N^T): the dt^3/6 (e.grad)^3 term of the Taylor
   // series along the characteristic, with (e.grad)^3 g ~ -(e.grad)^2 dg/dt.
   template <int fe_degree>
-  class StreamingMatrix
+  class StreamingMatrix : public Observable
   {
   public:
     using FEEval    = FEEvaluation<2, fe_degree, fe_degree + 1, 1, Number>;
@@ -80,8 +88,8 @@ namespace lbfem
     // dst = A src, with before(i, j) run on the locally owned entries [i, j)
     // before the loop first touches them (it must zero dst there) and after(i,
     // j) once it no longer does (dst[i, j) is final). Constrained rows are the
-    // identity. SolverCG detects this overload and moves its vector updates
-    // and reductions into it.
+    // identity. SolverCG and PreconditionRelaxation detect this overload and
+    // move their vector updates into it.
     void
     vmult(VectorType &dst, const VectorType &src, const RangeFunc &before, const RangeFunc &after) const
     {
@@ -145,13 +153,13 @@ namespace lbfem
 
 
 
-  // A diagonal preconditioner for the fused CG that offers apply_to_subrange()
-  // only. Given the per-entry apply() of DiagonalMatrix, SolverCG
+  // The Jacobi preconditioner of CG, with apply_to_subrange() but no per-entry
+  // apply(). Given the apply() of DiagonalMatrix, the fused SolverCG
   // preconditions lane by lane into a SIMD register, which with SIMD width 2
-  // (deal.II 9.7.1) makes its updates 2.5-4x slower than on blocks of 128
+  // (deal.II 9.7.1) makes its updates 2.5-4x slower than on ranges of 128
   // entries, and the fused CG slower than the unfused one (see
   // docs/dealii-fused-cg.md).
-  struct BlockJacobi
+  struct RangeJacobi
   {
     void
     vmult(VectorType &dst, const VectorType &src) const
@@ -166,16 +174,22 @@ namespace lbfem
     const DiagonalMatrix<VectorType> &D;
   };
 
-  // A matrix without the range operations of its vmult: SolverCG then runs
-  // its classic iteration.
+  // A matrix without the range operations of its vmult: deal.II then runs
+  // the classic, unfused iterations.
   template <typename Matrix>
-  struct Unfused
+  class Unfused : public Observable
   {
+  public:
+    explicit Unfused(const Matrix &A)
+      : A(A)
+    {}
     void
     vmult(VectorType &dst, const VectorType &src) const
     {
       A.vmult(dst, src);
     }
+
+  private:
     const Matrix &A;
   };
 
@@ -191,70 +205,42 @@ namespace lbfem
     MassSolver(const Disc &disc, const Settings &settings)
       : disc(disc)
       , settings(settings)
-    {
-      disc.matrix_free->initialize_dof_vector(Mx);
-    }
+    {}
 
-    // x <- A^{-1} r, A = M, or M + tg3_coefficient K_e(e) if tg3_coefficient > 0
-    // (CG only). CG starts from the given x; the lumped variants overwrite it.
+    // x <- A^{-1} r, A = M + tg3_coefficient K_e(e). CG starts from the given
+    // x; the lumped variants overwrite it.
     void
     solve(VectorType &x, const VectorType &r, const Direction &e, const Number tg3_coefficient)
     {
-      const auto &DL = *disc.mass.get_matrix_lumped_diagonal_inverse();
       switch (settings.type)
         {
           case Mass::lumped:
-            DL.vmult(x, r);
+            disc.mass.get_matrix_lumped_diagonal_inverse()->vmult(x, r);
             vector_passes += 2;
             flops_per_node += 1;
             break;
 
-          case Mass::richardson: // x_0 = M_L^{-1} r, x_{j+1} = x_j + M_L^{-1} (r - M x_j)
-            DL.vmult(x, r);
-            if (settings.fused)
-              {
-                const StreamingMatrix<fe_degree> M(*disc.matrix_free);
-                const Number *const              dl = DL.get_vector().begin();
-                const Number *const              rr = r.begin();
-                Number *const                    xx = x.begin();
-                Number *const                    mx = Mx.begin();
-                for (unsigned int j = 0; j < settings.richardson; ++j)
-                  M.vmult(
-                    Mx,
-                    x,
-                    [&](const unsigned int begin, const unsigned int end) { std::fill(mx + begin, mx + end, 0.); },
-                    [&](const unsigned int begin, const unsigned int end) {
-#pragma GCC ivdep
-                      for (unsigned int i = begin; i < end; ++i)
-                        xx[i] += dl[i] * (rr[i] - mx[i]);
-                    });
-              }
-            else
-              for (unsigned int j = 0; j < settings.richardson; ++j)
-                {
-                  disc.mass.vmult(Mx, x);
-                  Mx.sadd(-1., 1., r);
-                  DL.vmult(Mx, Mx);
-                  x += Mx;
-                }
-            // x_0: r, M_L^{-1}, x; per pass x (read, write), r, M_L^{-1} and M x:
-            // written, read and written three times, or (fused) once, in cache
-            vector_passes += 3 + (settings.fused ? 5. : 11.) * settings.richardson;
+          case Mass::richardson: // x_0 = M_L^{-1} r, x_{j+1} = x_j + M_L^{-1} (r - A x_j)
+            with_matrix(e, tg3_coefficient, [&](const auto &A) {
+              using Relaxation = PreconditionRelaxation<std::decay_t<decltype(A)>, DiagonalMatrix<VectorType>>;
+              typename Relaxation::AdditionalData data(1., settings.richardson + 1);
+              data.preconditioner = disc.mass.get_matrix_lumped_diagonal_inverse();
+              Relaxation richardson;
+              richardson.initialize(A, data);
+              richardson.vmult(x, r);
+            });
+            // x_0: r, M_L^{-1}, x; per pass x, r, M_L^{-1}, A x (written, read)
+            // and the update, or (fused) with A x in cache
+            vector_passes += 3 + (settings.fused ? 5. : 7.) * settings.richardson;
             flops_per_node += 1 + (flops_vmult + 3.) * settings.richardson;
             break;
 
           case Mass::cg:
             {
-              SolverControl                    control(settings.cg_max_iterations, settings.cg_tolerance * r.l2_norm());
-              SolverCG<VectorType>             cg(control);
-              const auto                      &jacobi = *disc.mass.get_matrix_diagonal_inverse();
-              const StreamingMatrix<fe_degree> A(*disc.matrix_free, tg3_coefficient, e);
-              if (settings.fused)
-                cg.solve(A, x, r, BlockJacobi{jacobi});
-              else if (tg3_coefficient == 0.)
-                cg.solve(disc.mass, x, r, jacobi);
-              else
-                cg.solve(Unfused<StreamingMatrix<fe_degree>>{A}, x, r, jacobi);
+              SolverControl control(settings.cg_max_iterations, settings.cg_tolerance * r.l2_norm());
+              with_matrix(e, tg3_coefficient, [&](const auto &A) {
+                SolverCG<VectorType>(control).solve(A, x, r, RangeJacobi{*disc.mass.get_matrix_diagonal_inverse()});
+              });
               cg_iterations += control.last_step();
               // per iteration: vmult 2, Jacobi 2, updates of x, r, p 6 vector
               // passes; fused, with A p in cache: x, r, p (read, write), A p,
@@ -274,8 +260,24 @@ namespace lbfem
     double                  flops_per_node = 0;
 
   private:
+    // f(A) with the matrix A = M + c K_e(e) as the solvers should see it:
+    // fused, the StreamingMatrix; unfused, deal.II's MassOperator for M (a
+    // little faster than StreamingMatrix) or StreamingMatrix without its range
+    // operations.
+    template <typename F>
+    void
+    with_matrix(const Direction &e, const Number c, F &&f) const
+    {
+      const StreamingMatrix<fe_degree> A(*disc.matrix_free, c, e);
+      if (settings.fused)
+        f(A);
+      else if (c == 0.)
+        f(disc.mass);
+      else
+        f(Unfused<StreamingMatrix<fe_degree>>(A));
+    }
+
     const Disc    &disc;
     const Settings settings;
-    VectorType     Mx; // Richardson passes
   };
 } // namespace lbfem

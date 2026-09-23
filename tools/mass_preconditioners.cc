@@ -37,11 +37,11 @@ using TG3LHS    = StreamingMatrix<p>;
 using Jacobi    = DiagonalMatrix<VectorType>;
 
 // Counts the applications of an operator. Chebyshev keeps a pointer to it
-// (hence Subscriptor) and checks its size (m(); el() is never called, since it
+// (hence Observable) and checks its size (m(); el() is never called, since it
 // gets the Jacobi preconditioner). Without the fused vmult of StreamingMatrix,
 // CG runs its classic, unfused iteration here.
 template <typename Operator>
-struct Counted : Subscriptor
+struct Counted : Observable
 {
   Counted(const Operator &A, const types::global_dof_index size)
     : A(A)

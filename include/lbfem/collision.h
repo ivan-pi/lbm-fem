@@ -157,12 +157,19 @@ namespace lbfem
           nodes.push_back(i);
     }
 
+    // What wall node i imposes.
+    WallNode
+    wall(const unsigned int i) const
+    {
+      const auto [ux, uy] = velocity[of_node[i]];
+      return {ux, uy};
+    }
+
     // What wall node k (of nodes) imposes.
     WallNode
     at(const unsigned int k) const
     {
-      const auto [ux, uy] = velocity[of_node[nodes[k]]];
-      return {ux, uy};
+      return wall(nodes[k]);
     }
 
     // Moments of node i, with the wall velocity on wall nodes (for output).
@@ -170,7 +177,7 @@ namespace lbfem
     macroscopic(const unsigned int i, const Populations &fi) const
     {
       const auto m = D2Q9::moments(fi);
-      return of_node[i] < 0 ? m : WallNode{velocity[of_node[i]][0], velocity[of_node[i]][1]}(m);
+      return of_node[i] < 0 ? m : wall(i)(m);
     }
 
     std::vector<int>                   of_node;  // -1: interior, else index into velocity

@@ -95,7 +95,7 @@ This has not been confirmed with hardware counters.
 Pass a preconditioner that has `apply_to_subrange()` but no `apply()`:
 
 ```cpp
-struct BlockJacobi
+struct RangeJacobi
 {
   void vmult(VectorType &dst, const VectorType &src) const { D.vmult(dst, src); }
   void apply_to_subrange(const unsigned int begin, const unsigned int end,
