@@ -8,6 +8,7 @@
 // an iteration passes through memory about once.
 #pragma once
 
+#include <deal.II/lac/diagonal_matrix.h>
 #include <deal.II/lac/solver_cg.h>
 #include <deal.II/lac/solver_control.h>
 
@@ -40,11 +41,11 @@ namespace lbfem
     // start needs about 25 iterations at the default tolerance and 38 at
     // 1e-12, from 32^2 to 512^2 cells (the extrapolated start, 2-16).
     unsigned int cg_max_iterations = 200;
-    // CG and Richardson: vector updates inside the cell loop. This saves memory
-    // traffic, and pays off where the operator is memory-bound: out of cache,
-    // higher degree, wide SIMD (Q2 at 4M dofs: 5-10 % faster). The Q1 operator
-    // is not (a vmult costs ~40 ns per dof with SSE2), and there fusing is up
-    // to a third slower (see README).
+    // CG and Richardson: vector updates inside the cell loop. This saves the
+    // memory traffic of the updates, which matters where the operator is cheap
+    // per dof and the vectors are out of cache: Q2 and Q4 at 4M dofs solve
+    // 13-27 % faster. Q1, whose vmult costs 25-35 ns per dof with SSE2, is
+    // within a few % either way (see README).
     bool fused = false;
   };
 
@@ -144,6 +145,27 @@ namespace lbfem
 
 
 
+  // A diagonal preconditioner for the fused CG that offers apply_to_subrange()
+  // only. Given the per-entry apply() of DiagonalMatrix, SolverCG (deal.II
+  // 9.5-9.7) preconditions lane by lane into a SIMD register; that runs ~3x
+  // slower than the vector updates it fuses (~9 ns per entry and iteration,
+  // with SSE2 or without SIMD, in or out of cache), whereas on blocks of 128
+  // entries it costs about as much as the unfused updates, or less.
+  struct BlockJacobi
+  {
+    void
+    vmult(VectorType &dst, const VectorType &src) const
+    {
+      D.vmult(dst, src);
+    }
+    void
+    apply_to_subrange(const unsigned int begin, const unsigned int end, const Number *src, Number *dst) const
+    {
+      D.apply_to_subrange(begin, end, src, dst);
+    }
+    const DiagonalMatrix<VectorType> &D;
+  };
+
   // A matrix without the range operations of its vmult: SolverCG then runs
   // its classic iteration.
   template <typename Matrix>
@@ -202,6 +224,7 @@ namespace lbfem
                     x,
                     [&](const unsigned int begin, const unsigned int end) { std::fill(mx + begin, mx + end, 0.); },
                     [&](const unsigned int begin, const unsigned int end) {
+#pragma GCC ivdep
                       for (unsigned int i = begin; i < end; ++i)
                         xx[i] += dl[i] * (rr[i] - mx[i]);
                     });
@@ -227,7 +250,7 @@ namespace lbfem
               const auto                      &jacobi = *disc.mass.get_matrix_diagonal_inverse();
               const StreamingMatrix<fe_degree> A(*disc.matrix_free, tg3_coefficient, e);
               if (settings.fused)
-                cg.solve(A, x, r, jacobi);
+                cg.solve(A, x, r, BlockJacobi{jacobi});
               else if (tg3_coefficient == 0.)
                 cg.solve(disc.mass, x, r, jacobi);
               else

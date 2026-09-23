@@ -233,7 +233,7 @@ extrapolation of the previous increments.
 * `--cfl` is $`\Delta t |e_x| / h_{min}`$.
 * `--fused` runs the vector updates of CG and of the Richardson passes inside
   the cell loop of the mass operator (see *Profiling* below); off by default,
-  since it is slower for $`Q_1`$.
+  since it only pays off for higher degrees on large meshes.
 * A list of Reynolds numbers is run as a continuation, each starting from the
   previous steady state. The cavity stops when the mean velocity change per
   $`t_{ref}`$ drops below `--steady-tol` (default $`10^{-4} U_0`$). If that does not
@@ -799,21 +799,37 @@ price of more steps; at a given error the higher degree still wins here.
   detects the `vmult` of `StreamingMatrix` that takes operations on ranges of
   the vectors) and of the Richardson passes run inside the cell loop, on each
   range of entries just before the loop first touches it and just after it
-  last does, with $`Ap`$ or $`Mx`$ still in cache. That saves memory traffic,
-  which only pays off where the operator is memory-bound. A mass `vmult` costs
-  ~40 ns per dof for $`Q_1`$ in the `dealii/dealii:v9.7.1-noble` container (SSE2)
-  and ~70 ns without SIMD, the vector updates of a CG iteration a few ns; 15
-  iterations from zero (Taylor-Green mesh, ms, best of 7, container):
+  last does, with $`Ap`$ or $`Mx`$ still in cache. Two findings:
 
-  | | unfused | fused |
-  |---|---|---|
-  | $`Q_1`$, $`263 \cdot 10^3`$ dofs, CG with $`M`$ / TG3 / Richardson | 154 / 299 / 150 | 205 / 309 / 176 |
-  | $`Q_1`$, $`4.2 \cdot 10^6`$ dofs (10 iterations) | 2088 / 3360 / 1778 | 2262 / 3330 / 2088 |
-  | $`Q_2`$, $`263 \cdot 10^3`$ dofs | 77 / 123 / 65 | 108 / 140 / 64 |
-  | $`Q_2`$, $`4.2 \cdot 10^6`$ dofs (10 iterations) | 1148 / 1621 / 865 | 1096 / 1542 / 827 |
+  - The preconditioner must not offer a per-entry `apply()`. `DiagonalMatrix`
+    does, and then `SolverCG` (deal.II 9.5-9.7) takes a path that
+    preconditions lane by lane into a SIMD register; its vector updates cost
+    ~9 ns per entry and iteration, in or out of cache and whatever the
+    degree, against 2-7 ns unfused. The fused CG therefore gets a Jacobi with
+    `apply_to_subrange()` only (`BlockJacobi`), which preconditions blocks of
+    128 entries; its updates then cost 2.4-5.3 ns.
+  - Fusing saves the memory traffic of the vector updates, which is a small
+    part of an iteration unless the operator is cheap per dof and the vectors
+    are out of cache. A $`Q_1`$ mass `vmult` costs 25-35 ns per dof with SSE2
+    (~60 ns without SIMD), a $`Q_4`$ one 5-10 ns.
 
-  So it is off by default; expect it to help for higher degrees, meshes well
-  beyond the cache and wider SIMD (AVX2/AVX-512 builds of deal.II).
+  `lbfem::MassSolver`, ns per dof and iteration, unfused → fused, in the
+  `dealii/dealii:v9.7.1-noble` container (SSE2):
+
+  | | CG with $`M`$ | CG with TG3 | Richardson |
+  |---|---|---|---|
+  | $`Q_1`$, $`1.7 \cdot 10^4`$ dofs | 28.2 → 31.8 | 47.1 → 50.4 | 26.7 → 26.7 |
+  | $`Q_1`$, $`2.6 \cdot 10^5`$ dofs | 32.3 → 32.8 | 51.1 → 52.9 | 29.7 → 28.6 |
+  | $`Q_1`$, $`4.2 \cdot 10^6`$ dofs | 36.6 → 35.6 | 57.2 → 55.8 | 33.4 → 31.5 |
+  | $`Q_2`$, $`4.2 \cdot 10^6`$ dofs | 22.0 → 18.5 | 27.8 → 24.2 | 15.8 → 13.6 |
+  | $`Q_4`$, $`2.6 \cdot 10^5`$ dofs | 9.6 → 9.4 | 14.6 → 15.3 | 7.2 → 6.3 |
+  | $`Q_4`$, $`4.2 \cdot 10^6`$ dofs | 15.7 → 11.5 | 20.2 → 16.7 | 10.9 → 8.1 |
+
+  Without SIMD (the Ubuntu package) $`Q_1`$ is within ±4 %, $`Q_2`$ at
+  $`4.2 \cdot 10^6`$ dofs 9-13 % faster. In cgdbe runs, whose warm-started CG
+  takes 1.5-17 iterations per solve, the step time changes by -6 % to +12 %
+  up to $`10^6`$ dofs, so `--fused` is off by default; it is for higher degrees
+  and meshes well beyond the cache.
 
   The roofline itself is measured, not assumed (`benchmarks/roofline.cc`, one core):
 
