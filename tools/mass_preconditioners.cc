@@ -19,7 +19,6 @@
 #include <lbfem/mass.h>
 #include <lbfem/schemes.h>
 #include <lbfem/test_cases.h>
-#include <lbfem/timers.h>
 
 #include <cstdio>
 #include <memory>
@@ -31,9 +30,9 @@
 using namespace dealii;
 using namespace lbfem;
 
-constexpr int p = LBFEM_DEGREE;
-using Disc      = Discretization<p>;
-using TG3LHS    = StreamingMatrix<p>;
+constexpr int p = fe_degree;
+using Disc      = Discretization;
+using TG3LHS    = StreamingMatrix<false>;
 using Jacobi    = DiagonalMatrix<VectorType>;
 
 // Counts the applications of an operator. Chebyshev keeps a pointer to it
@@ -130,19 +129,15 @@ study(const std::string &label, TestCase &tc, const unsigned int refinements)
     v = uni(gen);
   disc.constraints.set_zero(random);
 
-  StageTimers timers;
-  Walls       walls;
-  tc.set_mach(0.1);
   tc.set_reynolds(400.);
-  walls.reinit(disc.node, tc);
-  Bardow<p> scheme(disc, walls, {.streaming = Streaming::tg2, .mass = {.type = Mass::lumped}}, timers);
+  Bardow scheme(disc, {.streaming = Streaming::tg2, .mass = {.type = Mass::lumped}});
   scheme.set_time_step({.dt = disc.time_step(0.4), .lambda = tc.relaxation_time()});
   scheme.set_initial_populations(tc);
   for (unsigned int n = 0; n < 50; ++n)
     scheme.step();
   BlockVectorType rhs;
   disc.initialize(rhs, n_moving);
-  scheme.streaming.advection_operator().apply(rhs, {.f = scheme.f}, D2Q9::e, {.dt = dt, .lambda = tc.relaxation_time()});
+  scheme.streaming.advection->apply(rhs, {.f = scheme.f}, D2Q9::e, {.dt = dt, .lambda = tc.relaxation_time()});
   const VectorType &advection = rhs.block(1); // population 2, e = (1, 1)
 
   const TG3LHS tg3(*disc.matrix_free, dt * dt / 6., {{1., 1.}});
@@ -155,14 +150,33 @@ study(const std::string &label, TestCase &tc, const unsigned int refinements)
   const Jacobi tg3_jacobi(tg3_diagonal);
 
   std::printf("\n%s, Q%d, %u^2 cells\n", label.c_str(), p, 1u << refinements);
-  std::printf("  %-4s %-19s %6s %6s %6s %6s %10s %10s %7s %9s %9s\n", "A", "preconditioner", "its", "A-app",
-              "its", "A-app", "lambda_min", "lambda_max", "kappa", "ms rand", "ms adv");
+  std::printf("  %-4s %-19s %6s %6s %6s %6s %10s %10s %7s %9s %9s\n",
+              "A",
+              "preconditioner",
+              "its",
+              "A-app",
+              "its",
+              "A-app",
+              "lambda_min",
+              "lambda_max",
+              "kappa",
+              "ms rand",
+              "ms adv");
   std::printf("  %-4s %-19s %13s %13s\n", "", "", "random rhs", "advection");
   const auto row = [&](const char *op, const std::string &name, const auto &A, const auto &P) {
     const auto r = solve(A, P, random), a = solve(A, P, advection);
-    std::printf("  %-4s %-19s %6u %6u %6u %6u %10.4f %10.4f %7.2f %9.3f %9.3f\n", op, name.c_str(), r.its,
-                r.applications, a.its, a.applications, r.lambda_min, r.lambda_max, r.lambda_max / r.lambda_min,
-                1e3 * r.seconds, 1e3 * a.seconds);
+    std::printf("  %-4s %-19s %6u %6u %6u %6u %10.4f %10.4f %7.2f %9.3f %9.3f\n",
+                op,
+                name.c_str(),
+                r.its,
+                r.applications,
+                a.its,
+                a.applications,
+                r.lambda_min,
+                r.lambda_max,
+                r.lambda_max / r.lambda_min,
+                1e3 * r.seconds,
+                1e3 * a.seconds);
   };
   const auto &jacobi = *disc.mass.get_matrix_diagonal_inverse();
   const auto &lumped = *disc.mass.get_matrix_lumped_diagonal_inverse();
@@ -196,8 +210,8 @@ main(int argc, char **argv)
 
   for (const unsigned int r : refinements)
     {
-      TaylorGreenVortex uniform(1, 1, 0.), distorted(1, 1, 0.1);
-      LidDrivenCavity   stretched(1.2), strongly_stretched(2.5);
+      TaylorGreenVortex uniform(0.1, 1, 1, 0.), distorted(0.1, 1, 1, 0.1);
+      LidDrivenCavity   stretched(0.1, 1.2), strongly_stretched(0.1, 2.5);
       study("Taylor-Green, uniform", uniform, r);
       study("Taylor-Green, distorted (eps = 0.1)", distorted, r);
       study("cavity, stretched (gamma = 1.2)", stretched, r);

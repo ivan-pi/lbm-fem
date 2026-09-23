@@ -1,11 +1,7 @@
 // Continuous Q_p discretization of the populations on a (distributed) box
 // [0, L]^2: mesh, degrees of freedom, periodicity constraints, the MatrixFree
-// data shared by all operators, the mass operator and the nodal data (support
-// points and lumped-mass weights) used by the nodal collision.
-//
-// MatrixFree DoF index 0 carries the populations (constrained only by
-// periodicity), DoF index 1 a scalar with zero boundary values (the stream
-// function, see io.h) when Settings::stream_function is set.
+// data shared by all operators, the mass operator, and the nodal data used by
+// the nodal collision (support points, lumped-mass weights, wall nodes).
 #pragma once
 
 #include <deal.II/base/mpi.h>
@@ -26,61 +22,72 @@
 #include <deal.II/lac/la_parallel_block_vector.h>
 #include <deal.II/lac/la_parallel_vector.h>
 
+#include <deal.II/matrix_free/fe_evaluation.h>
 #include <deal.II/matrix_free/matrix_free.h>
 #include <deal.II/matrix_free/operators.h>
 
+#include <lbfem/d2q9.h>
 #include <lbfem/test_case.h>
 
-#include <array>
 #include <memory>
 #include <vector>
+
+#ifndef LBFEM_DEGREE
+#  define LBFEM_DEGREE 1
+#endif
 
 namespace lbfem
 {
   using namespace dealii;
 
+  // The polynomial degree of the FE_Q elements is a compile-time constant of the
+  // matrix-free kernels (cmake -DLBFEM_DEGREE=p).
+  inline constexpr int fe_degree = LBFEM_DEGREE;
+  inline constexpr int dim       = 2;
+
   using Number          = double;
   using VectorType      = LinearAlgebra::distributed::Vector<Number>;
   using BlockVectorType = LinearAlgebra::distributed::BlockVector<Number>;
-  using Direction       = std::array<double, 2>;
+  using MassOperator    = MatrixFreeOperators::MassOperator<dim, fe_degree, fe_degree + 1, 1, VectorType>;
+
+  template <int n_components>
+  using FEEval = FEEvaluation<dim, fe_degree, fe_degree + 1, n_components, Number>;
 
   struct MeshSettings
   {
-    unsigned int refinements     = 6;     // 2^n x 2^n elements ...
-    unsigned int n_cells         = 0;     // ... or, if > 0, n_cells x n_cells elements
-    bool         stream_function = false; // set up DoF index 1 with psi = 0 on the boundary
+    unsigned int refinements = 6; // 2^n x 2^n elements ...
+    unsigned int n_cells     = 0; // ... or, if > 0, n_cells x n_cells elements
   };
 
-  template <int fe_degree>
+  // The locally owned wall nodes and the velocity of the wall each is on.
+  struct Walls
+  {
+    std::vector<unsigned int> nodes;
+    std::vector<Direction>    velocity;
+  };
+
   struct Discretization
   {
-    static constexpr int dim    = 2;
-    static constexpr int n_q_1d = fe_degree + 1;
-
-    using MassOperator = MatrixFreeOperators::MassOperator<dim, fe_degree, n_q_1d, 1, VectorType>;
-    using Settings     = MeshSettings;
-
     explicit Discretization(const MPI_Comm comm)
       : triangulation(comm)
       , fe(fe_degree)
       , dof_handler(triangulation)
     {}
 
-    // Box [0, tc.L]^2 with the periodicity and mesh transformation of the test case.
+    // Box [0, tc.L]^2 with the periodicity, mesh transformation and walls of the test case.
     void
-    reinit(const Settings &settings, const TestCase &tc)
+    reinit(const MeshSettings &settings, const TestCase &tc)
     {
       const double L = tc.L;
       if (settings.n_cells > 0)
         GridGenerator::subdivided_hyper_cube(triangulation, settings.n_cells, 0., L, /*colorize*/ true);
       else
         GridGenerator::hyper_cube(triangulation, 0., L, /*colorize*/ true);
-      const unsigned int n_per_dir = settings.n_cells > 0 ? settings.n_cells : (1u << settings.refinements);
-      n_periodic                   = tc.n_periodic();
+      const unsigned int n_per_dir  = settings.n_cells > 0 ? settings.n_cells : (1u << settings.refinements);
+      const unsigned int n_periodic = tc.n_periodic();
       if (n_periodic > 0)
         {
-          std::vector<
-            GridTools::PeriodicFacePair<typename parallel::distributed::Triangulation<dim>::cell_iterator>>
+          std::vector<GridTools::PeriodicFacePair<typename parallel::distributed::Triangulation<dim>::cell_iterator>>
             periodic_faces;
           for (unsigned int d = 0; d < n_periodic; ++d)
             GridTools::collect_periodic_faces(triangulation, 2 * d, 2 * d + 1, d, periodic_faces);
@@ -95,18 +102,14 @@ namespace lbfem
       dof_handler.distribute_dofs(fe);
 
       const IndexSet relevant = DoFTools::extract_locally_relevant_dofs(dof_handler);
-      for (auto *c : {&constraints, &constraints_wall})
 #if DEAL_II_VERSION_GTE(9, 6, 0)
-        c->reinit(dof_handler.locally_owned_dofs(), relevant);
+      constraints.reinit(dof_handler.locally_owned_dofs(), relevant);
 #else
-        c->reinit(relevant);
+      constraints.reinit(relevant);
 #endif
       for (unsigned int d = 0; d < n_periodic; ++d)
         DoFTools::make_periodicity_constraints(dof_handler, 2 * d, 2 * d + 1, d, constraints);
-      if (settings.stream_function)
-        DoFTools::make_zero_boundary_constraints(dof_handler, constraints_wall);
       constraints.close();
-      constraints_wall.close();
 
       typename MatrixFree<dim, Number>::AdditionalData data;
       data.tasks_parallel_scheme = MatrixFree<dim, Number>::AdditionalData::none;
@@ -115,13 +118,9 @@ namespace lbfem
         data.mapping_update_flags_boundary_faces = update_gradients | update_JxW_values | update_normal_vectors;
 
       matrix_free = std::make_shared<MatrixFree<dim, Number>>();
-      matrix_free->reinit(mapping,
-                          std::vector<const DoFHandler<dim> *>{&dof_handler, &dof_handler},
-                          std::vector<const AffineConstraints<Number> *>{&constraints, &constraints_wall},
-                          std::vector<Quadrature<1>>{QGauss<1>(n_q_1d)},
-                          data);
+      matrix_free->reinit(mapping, dof_handler, constraints, QGauss<1>(fe_degree + 1), data);
 
-      mass.initialize(matrix_free, {0});
+      mass.initialize(matrix_free);
       mass.compute_lumped_diagonal(); // lumped mass, Richardson passes, node_weight()
       mass.compute_diagonal();        // Jacobi preconditioner for CG
 
@@ -129,12 +128,18 @@ namespace lbfem
       const auto &owned          = dof_handler.locally_owned_dofs();
       node.resize(owned.n_elements());
       independent.clear();
+      walls = {};
       for (unsigned int i = 0; i < node.size(); ++i)
         {
           const auto global = owned.nth_index_in_set(i);
           node[i]           = support_points.at(global);
           if (!constraints.is_constrained(global))
             independent.push_back(i);
+          if (const auto u = tc.wall_velocity(node[i]))
+            {
+              walls.nodes.push_back(i);
+              walls.velocity.push_back(*u);
+            }
         }
     }
 
@@ -169,29 +174,17 @@ namespace lbfem
       return node.size();
     }
 
-    // Number of cell batches with cartesian, affine and general geometry.
-    std::array<unsigned int, 3>
-    cell_batch_types() const
-    {
-      using GT = internal::MatrixFreeFunctions::GeometryType;
-      std::array<unsigned int, 4> n_type{};
-      for (unsigned int c = 0; c < matrix_free->n_cell_batches(); ++c)
-        ++n_type[matrix_free->get_mapping_info().get_cell_type(c)];
-      return {{n_type[GT::cartesian], n_type[GT::affine], n_type[GT::general]}};
-    }
-
     parallel::distributed::Triangulation<dim> triangulation;
     const FE_Q<dim>                           fe;
     const MappingQ1<dim>                      mapping;
     DoFHandler<dim>                           dof_handler;
-    AffineConstraints<Number>                 constraints;      // periodicity, or none
-    AffineConstraints<Number>                 constraints_wall; // zero boundary values (DoF index 1)
+    AffineConstraints<Number>                 constraints; // periodicity, or none
     std::shared_ptr<MatrixFree<dim, Number>>  matrix_free;
     MassOperator                              mass;
-    unsigned int                              n_periodic = 0;
-    double                                    h_min      = 0.;
+    double                                    h_min = 0.;
 
     std::vector<Point<dim>>   node;        // support point per locally owned dof
     std::vector<unsigned int> independent; // owned dofs that are not periodic slaves
+    Walls                     walls;
   };
 } // namespace lbfem

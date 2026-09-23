@@ -9,6 +9,7 @@
 
 #include <cmath>
 #include <numbers>
+#include <optional>
 #include <string>
 
 namespace lbfem
@@ -21,8 +22,9 @@ namespace lbfem
   {
     double n1, n2, distort;
 
-    TaylorGreenVortex(const unsigned int n1, const unsigned int n2, const double distort)
-      : n1(n1)
+    TaylorGreenVortex(const double mach, const unsigned int n1, const unsigned int n2, const double distort)
+      : TestCase(mach)
+      , n1(n1)
       , n2(n2)
       , distort(distort)
     {}
@@ -30,8 +32,7 @@ namespace lbfem
     std::string
     name() const override
     {
-      return "Taylor-Green vortex, periodic, modes (" + std::to_string(int(n1)) + "," +
-             std::to_string(int(n2)) + ")";
+      return "Taylor-Green vortex, periodic, modes (" + std::to_string(int(n1)) + "," + std::to_string(int(n2)) + ")";
     }
     std::string
     tag(const double) const override
@@ -43,6 +44,11 @@ namespace lbfem
     {
       return 2;
     }
+    bool
+    steady() const override
+    {
+      return false;
+    }
     // smooth periodic distortion: general (non-parallelogram) quadrilaterals
     void
     transform_mesh(Triangulation<2> &tria, double &) const override
@@ -51,8 +57,8 @@ namespace lbfem
         return;
       GridTools::transform(
         [&](const Point<2> &p) {
-          const double d = distort * L * std::sin(2 * std::numbers::pi * p[0] / L) *
-                           std::sin(2 * std::numbers::pi * p[1] / L);
+          const double d =
+            distort * L * std::sin(2 * std::numbers::pi * p[0] / L) * std::sin(2 * std::numbers::pi * p[1] / L);
           return Point<2>(p[0] + d, p[1] + d);
         },
         tria);
@@ -77,11 +83,6 @@ namespace lbfem
     {
       return 1. / (nu * (k1() * k1() + k2() * k2()));
     }
-    bool
-    has_exact_solution() const override
-    {
-      return true;
-    }
     double
     energy_scale() const override // exact mean of |u|^2 at t = 0
     {
@@ -101,17 +102,17 @@ namespace lbfem
     //      = -lambda w rho [ (ex^2 - ey^2) u_x + ex ey (u_y + v_x) ] / cs^2   (div u = 0),
     // which removes the initial layer
     std::array<double, D2Q9::Q>
-    initial_populations(const Point<2> &p, const double lambda, const double neq_scale) const override
+    initial_populations(const Point<2> &p, const double lambda) const override
     {
       const auto   m  = exact(p, 0.);
       auto         f  = D2Q9::equilibrium(m);
       const double x1 = k1() * p[0], y2 = k2() * p[1];
-      const double ux = U0 * k1() * std::sin(x1) * std::sin(y2);                                // du/dx
+      const double ux = U0 * k1() * std::sin(x1) * std::sin(y2);                               // du/dx
       const double sh = U0 * (k1() * k1() - k2() * k2()) / k2() * std::cos(x1) * std::cos(y2); // du/dy + dv/dx
       for (unsigned int a = 0; a < D2Q9::Q; ++a)
         {
           const auto [ex, ey] = D2Q9::e[a];
-          f[a] -= neq_scale * lambda / D2Q9::cs2 * D2Q9::w[a] * m.rho * ((ex * ex - ey * ey) * ux + ex * ey * sh);
+          f[a] -= lambda / D2Q9::cs2 * D2Q9::w[a] * m.rho * ((ex * ex - ey * ey) * ux + ex * ey * sh);
         }
       return f;
     }
@@ -123,6 +124,8 @@ namespace lbfem
   // periodic in x; Eq. (26) of Lee & Lin.
   struct CouetteFlow : TestCase
   {
+    using TestCase::TestCase;
+
     std::string
     name() const override
     {
@@ -138,20 +141,24 @@ namespace lbfem
     {
       return 1;
     }
-    int
-    wall_of(const Point<2> &p) const override
+    bool
+    steady() const override
     {
-      return std::abs(p[1]) < 1e-12 * L ? 0 : std::abs(p[1] - L) < 1e-12 * L ? 1 : -1;
+      return false;
+    }
+    std::optional<Direction>
+    wall_velocity(const Point<2> &p) const override
+    {
+      if (std::abs(p[1]) < 1e-12 * L)
+        return Direction{{0., 0.}};
+      if (std::abs(p[1] - L) < 1e-12 * L)
+        return Direction{{U0, 0.}};
+      return {};
     }
     double
     reference_time() const override // diffusion time
     {
       return L * L / nu;
-    }
-    bool
-    has_exact_solution() const override
-    {
-      return true;
     }
     D2Q9::Moments
     exact(const Point<2> &p, const double t) const override
@@ -166,22 +173,23 @@ namespace lbfem
       return {rho0, u, 0.};
     }
     std::array<double, D2Q9::Q>
-    initial_populations(const Point<2> &, const double, const double) const override
+    initial_populations(const Point<2> &, const double) const override
     {
-      return D2Q9::equilibrium({rho0, 0., 0.}); // fluid at rest
+      return D2Q9::equilibrium({rho0, 0., 0.}); // fluid at rest (the series above is not, at t = 0)
     }
   };
 
 
 
   // Lid-driven cavity (Lee & Lin, Sec. 3.2) on a tanh-clustered mesh, run to a
-  // steady state; a list of Reynolds numbers is a continuation.
+  // steady state from rest; a list of Reynolds numbers is a continuation.
   struct LidDrivenCavity : TestCase
   {
     double stretch;
 
-    explicit LidDrivenCavity(const double stretch)
-      : stretch(stretch)
+    LidDrivenCavity(const double mach, const double stretch)
+      : TestCase(mach)
+      , stretch(stretch)
     {}
 
     std::string
@@ -199,6 +207,11 @@ namespace lbfem
     {
       return 0;
     }
+    bool
+    steady() const override
+    {
+      return true;
+    }
     void
     transform_mesh(Triangulation<2> &tria, double &h_min) const override
     {
@@ -212,28 +225,22 @@ namespace lbfem
     }
     // The top corners belong to the side walls: a moving corner node would carry
     // momentum through the side walls (a mass source/sink pair).
-    int
-    wall_of(const Point<2> &p) const override
+    std::optional<Direction>
+    wall_velocity(const Point<2> &p) const override
     {
-      const auto on = [&](const double x, const double x0) { return std::abs(x - x0) < 1e-12 * L; };
+      const auto on = [&](const double x, const double x0) {
+        return std::abs(x - x0) < 1e-12 * L;
+      };
       if (on(p[0], 0.) || on(p[0], L) || on(p[1], 0.))
-        return 0;
-      return on(p[1], L) ? 1 : -1;
+        return Direction{{0., 0.}};
+      if (on(p[1], L))
+        return Direction{{U0, 0.}};
+      return {};
     }
     double
     reference_time() const override // lid time
     {
       return L / U0;
-    }
-    bool
-    has_exact_solution() const override
-    {
-      return false;
-    }
-    std::array<double, D2Q9::Q>
-    initial_populations(const Point<2> &, const double, const double) const override
-    {
-      return D2Q9::equilibrium({rho0, 0., 0.});
     }
   };
 } // namespace lbfem

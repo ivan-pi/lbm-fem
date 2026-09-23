@@ -107,18 +107,18 @@ stiffness stencil) of
 ### Code structure
 
 The numerics live in the header-only library `include/lbfem` (namespace
-`lbfem`), templated on the element degree; `apps/cgdbe/cgdbe.cc` is one driver
-built on it. Each header is a piece a driver can pull in on its own:
+`lbfem`); the element degree is its compile-time constant `fe_degree`
+(`-DLBFEM_DEGREE=p`). `apps/cgdbe/cgdbe.cc` is one driver built on it. Each header is a piece a driver can pull in on its own:
 
 | header | contents |
 |---|---|
 | `d2q9.h` | velocities, weights, moments, equilibrium; its isotropy is checked at compile time |
 | `test_case.h`, `test_cases.h` | the `TestCase` interface (periodicity, mesh transformation, wall nodes and velocities, initial populations, reference solution, time scale) and the three flows above |
-| `discretization.h` | mesh, `FE_Q`, `MatrixFree`, mass operator, nodal coordinates and weights |
-| `collision.h` | `nodal_map` (a lambda mapped over the nodes), wall nodes, BGK collision, Lee & Lin equilibria and predictor-corrector |
+| `discretization.h` | mesh, `FE_Q`, `MatrixFree`, mass operator, nodal coordinates and weights, the wall nodes |
+| `collision.h` | `nodal_map` (a lambda mapped over the nodes, the wall nodes apart), BGK collision, Lee & Lin equilibria and predictor-corrector |
 | `advection.h` | `AdvectionOperator`, the virtual interface a scheme streams through, and its two implementations (`TaylorGalerkinAdvection`, `LeeLinAdvection`), built from generic matrix-free loops that take the weak form at a quadrature point as a lambda |
 | `mass.h` | CG, lumped and Richardson mass solves, the TG3 left-hand side |
-| `streaming.h` | `TaylorGalerkin`: increments A^{-1} r, TG2/TG3/split sweeps, the extrapolated CG start |
+| `streaming.h` | `TaylorGalerkin`: the increments A^{-1} r of one sweep or of the two split sweeps, the extrapolated CG start |
 | `schemes.h` | `LeeLin` and `Bardow`, behind a `Scheme` interface |
 | `io.h`, `timers.h` | stream function, checkpoints; per-stage timers |
 
@@ -783,7 +783,7 @@ price of more steps; at a given error the higher degree still wins here.
   loop, and the summary shows their maximum over the ranks.
 
   Next to it a **flop model** (multiply-add counted as 2; the per-node counts are
-  in the source next to `collision_work()` etc.): `bardow` collision 157 flops
+  in `print_summary` of the driver): `bardow` collision 157 flops
   per node (moments 20, equilibrium 102, relaxation 27, increment 8), `leelin`
   303; advection 184 flops per cell and population for $`Q_1`$ on a cartesian cell
   (sum-factorised gradients 72, quadrature 24, integration 88), i.e. 1461 per

@@ -8,9 +8,6 @@
 #include <deal.II/base/timer.h>
 
 #include <array>
-#include <concepts>
-#include <functional>
-#include <utility>
 
 namespace lbfem
 {
@@ -49,13 +46,13 @@ namespace lbfem
       dealii::Timer &timer;
     };
 
-    // Runs fn() within the given stage and returns its result.
-    template <std::invocable F>
-    decltype(auto)
+    // Runs fn() within the given stage.
+    template <typename F>
+    void
     time(const Stage stage, F &&fn)
     {
       const Scope scope(*this, stage);
-      return std::invoke(std::forward<F>(fn));
+      fn();
     }
 
     // The accumulated time of each stage and, last, the rest of total (this

@@ -5,30 +5,21 @@
 
 #include <array>
 
+namespace lbfem
+{
+  using Direction = std::array<double, 2>; // a lattice velocity, or any vector in the plane
+}
+
 namespace lbfem::D2Q9
 {
   inline constexpr unsigned int Q   = 9;
   inline constexpr double       cs2 = 1. / 3.;
 
-  inline constexpr std::array<std::array<double, 2>, Q> e = {{{{0, 0}},
-                                                              {{1, 0}},
-                                                              {{1, 1}},
-                                                              {{0, 1}},
-                                                              {{-1, 1}},
-                                                              {{-1, 0}},
-                                                              {{-1, -1}},
-                                                              {{0, -1}},
-                                                              {{1, -1}}}};
+  inline constexpr std::array<Direction, Q> e = {
+    {{{0, 0}}, {{1, 0}}, {{1, 1}}, {{0, 1}}, {{-1, 1}}, {{-1, 0}}, {{-1, -1}}, {{0, -1}}, {{1, -1}}}};
 
-  inline constexpr std::array<double, Q> w = {{4. / 9.,
-                                               1. / 9.,
-                                               1. / 36.,
-                                               1. / 9.,
-                                               1. / 36.,
-                                               1. / 9.,
-                                               1. / 36.,
-                                               1. / 9.,
-                                               1. / 36.}};
+  inline constexpr std::array<double, Q> w = {
+    {4. / 9., 1. / 9., 1. / 36., 1. / 9., 1. / 36., 1. / 9., 1. / 36., 1. / 9., 1. / 36.}};
 
   struct Moments
   {
@@ -91,8 +82,9 @@ namespace lbfem::D2Q9
   static_assert(detail::near(detail::lattice_tensor(0, 0), cs2) && detail::near(detail::lattice_tensor(1, 1), cs2) &&
                 detail::near(detail::lattice_tensor(0, 1), 0.));
   static_assert(detail::near(detail::lattice_tensor(0, 0, 0), 0.) && detail::near(detail::lattice_tensor(0, 1, 1), 0.));
-  static_assert(detail::near(detail::lattice_tensor(0, 0, 0, 0), 3 * cs2 * cs2) &&
-                detail::near(detail::lattice_tensor(0, 0, 1, 1), cs2 * cs2) &&
+  inline constexpr double cs4 = cs2 * cs2;
+  static_assert(detail::near(detail::lattice_tensor(0, 0, 0, 0), 3 * cs4) &&
+                detail::near(detail::lattice_tensor(0, 0, 1, 1), cs4) &&
                 detail::near(detail::lattice_tensor(0, 0, 0, 1), 0.));
   static_assert([] {
     const Moments m = moments(equilibrium({1.1, 0.05, -0.02}));

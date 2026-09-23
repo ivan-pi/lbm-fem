@@ -35,15 +35,14 @@ option(LBFEM_NATIVE "Compile with -O3 -march=native" ON)
 # target_link_libraries signature, the one deal_ii_setup_target uses.
 add_library(lbfem INTERFACE)
 target_include_directories(lbfem INTERFACE ${PROJECT_SOURCE_DIR}/include)
+target_compile_definitions(lbfem INTERFACE LBFEM_DEGREE=${LBFEM_DEGREE})
 target_compile_features(lbfem INTERFACE cxx_std_20)
 
-# A driver: an executable built on deal.II and lbfem. Its sources see
-# LBFEM_DEGREE as a compile definition.
+# A driver: an executable built on deal.II and lbfem.
 function(lbfem_add_driver name)
   add_executable(${name} ${ARGN})
   deal_ii_setup_target(${name})
   target_link_libraries(${name} lbfem)
-  target_compile_definitions(${name} PRIVATE LBFEM_DEGREE=${LBFEM_DEGREE})
   if(LBFEM_NATIVE)
     target_compile_options(${name} PRIVATE $<$<CONFIG:Release>:-O3 -march=native>)
   endif()

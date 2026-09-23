@@ -26,8 +26,14 @@ using namespace lbfem;
 // of the velocity the relaxation targets (the wall velocity (wx, wy) on a wall
 // node); the result goes to node j of Out.
 static inline void
-collide_node(const double *const *G, const std::size_t i, const double omega, const bool on_wall, const double wx,
-             const double wy, double *const *Out, const std::size_t j)
+collide_node(const double *const *G,
+             const std::size_t    i,
+             const double         omega,
+             const bool           on_wall,
+             const double         wx,
+             const double         wy,
+             double *const       *Out,
+             const std::size_t    j)
 {
   double gi[Q], rho = 0., mx = 0., my = 0.;
   for (unsigned int a = 0; a < Q; ++a)
@@ -55,8 +61,8 @@ collide_node(const double *const *G, const std::size_t i, const double omega, co
 void
 collide_simd(BlockVectorType &g, const Walls &walls, const double omega)
 {
-  const std::size_t n = g.block(0).locally_owned_size(), n_wall = walls.nodes.size();
-  double           *G[Q], *W[Q];
+  const std::size_t   n = g.block(0).locally_owned_size(), n_wall = walls.nodes.size();
+  double             *G[Q], *W[Q];
   std::vector<double> buffer(Q * n_wall);
   for (unsigned int a = 0; a < Q; ++a)
     {
@@ -65,7 +71,7 @@ collide_simd(BlockVectorType &g, const Walls &walls, const double omega)
     }
   for (std::size_t k = 0; k < n_wall; ++k)
     {
-      const auto [wx, wy] = walls.at(k);
+      const auto [wx, wy] = walls.velocity[k];
       collide_node(G, walls.nodes[k], omega, true, wx, wy, W, k);
     }
 #pragma omp simd
@@ -82,25 +88,32 @@ int
 main(int argc, char **argv)
 {
   dealii::Utilities::MPI::MPI_InitFinalize mpi(argc, argv, 1);
-  const std::size_t n     = argc > 1 ? std::atol(argv[1]) : 16641;
-  const int         reps  = argc > 2 ? std::atoi(argv[2]) : 200;
-  const double      omega = 1.6;
+  const std::size_t                        n     = argc > 1 ? std::atol(argv[1]) : 16641;
+  const int                                reps  = argc > 2 ? std::atoi(argv[2]) : 200;
+  const double                             omega = 1.6;
 
   // a square of nodes with walls on its border and a moving lid on top
-  std::vector<int>  wall_of_node(n);
+  Walls             walls;
   BlockVectorType   init(Q, n);
   const std::size_t side = std::lround(std::sqrt(double(n)));
   for (std::size_t i = 0; i < n; ++i)
     {
       const std::size_t x = i % side, y = i / side;
-      wall_of_node[i]     = (y + 1 == side) ? 1 : (x == 0 || x + 1 == side || y == 0) ? 0 : -1;
+      if (y + 1 == side)
+        {
+          walls.nodes.push_back(i);
+          walls.velocity.push_back({{0.0577, 0.}});
+        }
+      else if (x == 0 || x + 1 == side || y == 0)
+        {
+          walls.nodes.push_back(i);
+          walls.velocity.push_back({{0., 0.}});
+        }
       const double ux = 0.03 * std::sin(0.1 * x), uy = 0.02 * std::cos(0.07 * y), rho = 1. + 1e-3 * std::sin(0.3 * i);
       const auto   feq = D2Q9::equilibrium({rho, ux, uy});
       for (unsigned int a = 0; a < Q; ++a)
         init.block(a)[i] = feq[a] * (1. + 1e-3 * std::cos(0.37 * i + a));
     }
-  Walls walls;
-  walls.set(std::move(wall_of_node), {{{0., 0.}}, {{0.0577, 0.}}});
 
   const auto time = [&](auto &&collide, BlockVectorType &g) {
     double best = 1e30;

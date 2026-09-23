@@ -3,9 +3,9 @@
 // (TG3): consistent (CG with Jacobi preconditioner), row-sum lumped, or lumped
 // with k Richardson passes (Donea's iterated lumping). With
 // MassSettings::fused, the vector operations of CG and of the Richardson
-// passes run inside the cell loop of the operator, on each range of entries
-// just before the loop first touches it and just after it last does, so that
-// an iteration passes through memory about once.
+// passes run inside the cell loop of the operator (deal.II's SolverCG and
+// PreconditionRelaxation do that when the matrix offers a vmult with
+// operations on ranges of the vectors).
 #pragma once
 
 #include <deal.II/lac/diagonal_matrix.h>
@@ -20,7 +20,6 @@
 
 #include <cstddef>
 #include <functional>
-#include <type_traits>
 
 namespace lbfem
 {
@@ -42,11 +41,9 @@ namespace lbfem
     // start needs about 25 iterations at the default tolerance and 38 at
     // 1e-12, from 32^2 to 512^2 cells (the extrapolated start, 2-16).
     unsigned int cg_max_iterations = 200;
-    // CG and Richardson: vector updates inside the cell loop. This saves the
-    // memory traffic of the updates, which matters where the operator is cheap
-    // per dof and the vectors are out of cache: Q2 and Q4 at 4M dofs solve
-    // 13-27 % faster. Q1, whose vmult costs 25-35 ns per dof with SSE2, is
-    // within a few % either way (see README).
+    // Vector updates of CG and Richardson inside the cell loop: pays off where
+    // the operator is memory-bound (higher degree, large meshes), see
+    // docs/performance.md.
     bool fused = false;
   };
 
@@ -63,16 +60,16 @@ namespace lbfem
   //   (M + dt^2/6 K_e) (g^{n+1} - g*) = -dt C_e g* - dt^2/2 K_e g*,
   // K_e = int (e.grad N)(e.grad N^T): the dt^3/6 (e.grad)^3 term of the Taylor
   // series along the characteristic, with (e.grad)^3 g ~ -(e.grad)^2 dg/dt.
-  template <int fe_degree>
+  // With fused, vmult also comes with operations on ranges of the vectors.
+  template <bool fused = true>
   class StreamingMatrix : public Observable
   {
   public:
-    using FEEval    = FEEvaluation<2, fe_degree, fe_degree + 1, 1, Number>;
-    using RangeFunc = std::function<void(const unsigned int, const unsigned int)>;
+    using RangeOperation = std::function<void(const unsigned int, const unsigned int)>;
 
-    explicit StreamingMatrix(const MatrixFree<2, Number> &mf,
-                             const Number                 coefficient = 0.,
-                             const Direction             &e           = {{0., 0.}})
+    explicit StreamingMatrix(const MatrixFree<dim, Number> &mf,
+                             const Number                   coefficient = 0.,
+                             const Direction               &e           = {{0., 0.}})
       : data(mf)
       , coef(coefficient)
       , e(e)
@@ -88,10 +85,10 @@ namespace lbfem
     // dst = A src, with before(i, j) run on the locally owned entries [i, j)
     // before the loop first touches them (it must zero dst there) and after(i,
     // j) once it no longer does (dst[i, j) is final). Constrained rows are the
-    // identity. SolverCG and PreconditionRelaxation detect this overload and
-    // move their vector updates into it.
+    // identity.
     void
-    vmult(VectorType &dst, const VectorType &src, const RangeFunc &before, const RangeFunc &after) const
+    vmult(VectorType &dst, const VectorType &src, const RangeOperation &before, const RangeOperation &after) const
+      requires fused
     {
       data.cell_loop(&StreamingMatrix::local_apply, this, dst, src, before, after);
     }
@@ -106,7 +103,7 @@ namespace lbfem
 
   private:
     DEAL_II_ALWAYS_INLINE void
-    cell_integral(FEEval &phi) const
+    cell_integral(FEEval<1> &phi) const
     {
       if (coef == 0.) // M
         {
@@ -119,9 +116,9 @@ namespace lbfem
       phi.evaluate(EvaluationFlags::values | EvaluationFlags::gradients);
       for (unsigned int q = 0; q < phi.n_q_points; ++q)
         {
-          const auto g  = phi.get_gradient(q);
-          const auto eg = e[0] * g[0] + e[1] * g[1];
-          Tensor<1, 2, VectorizedArray<Number>> flux;
+          const auto                              g  = phi.get_gradient(q);
+          const auto                              eg = e[0] * g[0] + e[1] * g[1];
+          Tensor<1, dim, VectorizedArray<Number>> flux;
           flux[0] = (coef * e[0]) * eg;
           flux[1] = (coef * e[1]) * eg;
           phi.submit_value(phi.get_value(q), q);
@@ -131,12 +128,12 @@ namespace lbfem
     }
 
     void
-    local_apply(const MatrixFree<2, Number> &,
+    local_apply(const MatrixFree<dim, Number> &,
                 VectorType                                  &dst,
                 const VectorType                            &src,
                 const std::pair<unsigned int, unsigned int> &range) const
     {
-      FEEval phi(data);
+      FEEval<1> phi(data);
       for (unsigned int cell = range.first; cell < range.second; ++cell)
         {
           phi.reinit(cell);
@@ -146,19 +143,17 @@ namespace lbfem
         }
     }
 
-    const MatrixFree<2, Number> &data;
-    const Number                 coef;
-    const Direction              e;
+    const MatrixFree<dim, Number> &data;
+    const Number                   coef;
+    const Direction                e;
   };
 
 
 
   // The Jacobi preconditioner of CG, with apply_to_subrange() but no per-entry
-  // apply(). Given the apply() of DiagonalMatrix, the fused SolverCG
-  // preconditions lane by lane into a SIMD register, which with SIMD width 2
-  // (deal.II 9.7.1) makes its updates 2.5-4x slower than on ranges of 128
-  // entries, and the fused CG slower than the unfused one (see
-  // docs/dealii-fused-cg.md).
+  // apply(): given the apply() of DiagonalMatrix, the fused SolverCG
+  // preconditions lane by lane, which is slower than the updates it fuses
+  // (docs/dealii-fused-cg.md).
   struct RangeJacobi
   {
     void
@@ -174,35 +169,12 @@ namespace lbfem
     const DiagonalMatrix<VectorType> &D;
   };
 
-  // A matrix without the range operations of its vmult: deal.II then runs
-  // the classic, unfused iterations.
-  template <typename Matrix>
-  class Unfused : public Observable
-  {
-  public:
-    explicit Unfused(const Matrix &A)
-      : A(A)
-    {}
-    void
-    vmult(VectorType &dst, const VectorType &src) const
-    {
-      A.vmult(dst, src);
-    }
-
-  private:
-    const Matrix &A;
-  };
 
 
-
-  template <int fe_degree>
   class MassSolver
   {
   public:
-    using Disc     = Discretization<fe_degree>;
-    using Settings = MassSettings;
-
-    MassSolver(const Disc &disc, const Settings &settings)
+    MassSolver(const Discretization &disc, const MassSettings &settings)
       : disc(disc)
       , settings(settings)
     {}
@@ -216,8 +188,6 @@ namespace lbfem
         {
           case Mass::lumped:
             disc.mass.get_matrix_lumped_diagonal_inverse()->vmult(x, r);
-            vector_passes += 2;
-            flops_per_node += 1;
             break;
 
           case Mass::richardson: // x_0 = M_L^{-1} r, x_{j+1} = x_j + M_L^{-1} (r - A x_j)
@@ -229,10 +199,6 @@ namespace lbfem
               richardson.initialize(A, data);
               richardson.vmult(x, r);
             });
-            // x_0: r, M_L^{-1}, x; per pass x, r, M_L^{-1}, A x (written, read)
-            // and the update, or (fused) with A x in cache
-            vector_passes += 3 + (settings.fused ? 5. : 7.) * settings.richardson;
-            flops_per_node += 1 + (flops_vmult + 3.) * settings.richardson;
             break;
 
           case Mass::cg:
@@ -242,42 +208,29 @@ namespace lbfem
                 SolverCG<VectorType>(control).solve(A, x, r, RangeJacobi{*disc.mass.get_matrix_diagonal_inverse()});
               });
               cg_iterations += control.last_step();
-              // per iteration: vmult 2, Jacobi 2, updates of x, r, p 6 vector
-              // passes; fused, with A p in cache: x, r, p (read, write), A p,
-              // the Jacobi diagonal (and 7 reductions instead of 2)
-              vector_passes += (settings.fused ? 8. : 10.) * control.last_step() + 4;
-              flops_per_node += (flops_vmult + (settings.fused ? 21. : 11.)) * control.last_step();
             }
         }
     }
 
-    // Arithmetic of one mass vmult per node (Q1, see README), and the work
-    // counters of all solves so far: CG iterations, vector passes per node
-    // (single-pass traffic model) and flops per node.
-    static constexpr double flops_vmult = 68;
-    std::size_t             cg_iterations  = 0;
-    double                  vector_passes  = 0;
-    double                  flops_per_node = 0;
+    std::size_t cg_iterations = 0; // of all solves so far
 
   private:
     // f(A) with the matrix A = M + c K_e(e) as the solvers should see it:
     // fused, the StreamingMatrix; unfused, deal.II's MassOperator for M (a
-    // little faster than StreamingMatrix) or StreamingMatrix without its range
-    // operations.
+    // little faster) or the StreamingMatrix without its range operations.
     template <typename F>
     void
     with_matrix(const Direction &e, const Number c, F &&f) const
     {
-      const StreamingMatrix<fe_degree> A(*disc.matrix_free, c, e);
       if (settings.fused)
-        f(A);
+        f(StreamingMatrix<true>(*disc.matrix_free, c, e));
       else if (c == 0.)
         f(disc.mass);
       else
-        f(Unfused<StreamingMatrix<fe_degree>>(A));
+        f(StreamingMatrix<false>(*disc.matrix_free, c, e));
     }
 
-    const Disc    &disc;
-    const Settings settings;
+    const Discretization &disc;
+    const MassSettings    settings;
   };
 } // namespace lbfem

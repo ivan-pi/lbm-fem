@@ -1,23 +1,20 @@
 // Nodal (collision) part of the schemes. The populations are block vectors
-// with one block per lattice direction (structure of arrays); nodal operations
-// are lambdas mapped over the locally owned nodes by nodal_map(), which the
-// compiler vectorizes across nodes. For that, an operation must be free of
-// branches that depend on the node and of calls it cannot inline.
+// with one block per lattice direction (structure of arrays); a nodal
+// operation is a lambda mapped over the locally owned nodes by nodal_map(),
+// which the compiler vectorizes across nodes. For that, an operation must be
+// free of branches that depend on the node and of calls it cannot inline.
 //
-// Walls enter through the moments: a nodal operation receives the velocity
-// the node imposes (FluidNode: its own, WallNode: the wall's), which is how
-// the boundary condition acts in the equilibria of both schemes. The loop over
-// all nodes is the fluid one; the few wall nodes are computed separately and
-// overwritten, so that the vectorized loop reads no wall data.
+// Walls enter through the moments: a nodal operation receives what the node
+// imposes on its moments (FluidNode: nothing, WallNode: the wall velocity),
+// which is how the boundary condition acts in the equilibria of both schemes.
+// The loop over all nodes is the fluid one; the few wall nodes are computed
+// apart and overwritten, so that the vectorized loop reads no wall data.
 #pragma once
 
 #include <lbfem/d2q9.h>
 #include <lbfem/discretization.h>
-#include <lbfem/test_case.h>
 
 #include <array>
-#include <type_traits>
-#include <utility>
 #include <vector>
 
 namespace lbfem
@@ -27,88 +24,32 @@ namespace lbfem
 
   using Populations = std::array<Number, Q>; // at one node
 
-  // A vector of the moving populations only: block b holds population b + 1
-  // (the streaming increments, for example).
-  struct Moving
+  // The n blocks of a vector at a node (all Q populations, or the Q-1 moving
+  // ones of an increment). Passed by value into the nodal loop, so that the
+  // block pointers are loop invariant.
+  template <unsigned int n>
+  struct Nodal
   {
-    const BlockVectorType &v;
-  };
-
-  // Read access to the populations first..Q-1 of each locally owned node,
-  // stored in blocks 0..Q-1-first; populations below first read as zero.
-  // The layout is part of the type, so the gathers are fully unrolled.
-  template <unsigned int first>
-  class NodalView
-  {
-  public:
-    explicit NodalView(const BlockVectorType &v)
+    explicit Nodal(const BlockVectorType &v)
     {
-      AssertDimension(v.n_blocks(), Q - first);
-      for (unsigned int b = 0; b < Q - first; ++b)
+      AssertDimension(v.n_blocks(), n);
+      for (unsigned int b = 0; b < n; ++b)
         p[b] = v.block(b).begin();
     }
 
-    Populations
+    std::array<Number, n>
     operator[](const unsigned int i) const
     {
-      Populations fi;
-      for (unsigned int a = 0; a < first; ++a)
-        fi[a] = 0.;
-      for (unsigned int a = first; a < Q; ++a)
-        fi[a] = p[a - first][i];
-      return fi;
+      std::array<Number, n> x;
+      for (unsigned int b = 0; b < n; ++b)
+        x[b] = p[b][i];
+      return x;
     }
 
-  private:
-    std::array<const Number *, Q - first> p{};
+    std::array<const Number *, n> p;
   };
 
-  inline NodalView<0>
-  view(const BlockVectorType &v)
-  {
-    return NodalView<0>(v);
-  }
-
-  inline NodalView<1>
-  view(const Moving &m)
-  {
-    return NodalView<1>(m.v);
-  }
-
-  template <typename T>
-  concept NodalInput = std::same_as<T, BlockVectorType> || std::same_as<T, Moving>;
-
-  template <typename>
-  using PopulationsOf = Populations; // maps a pack of inputs to a pack of Populations
-
-  // out_i <- op(i, in_i...) at every locally owned node i, with the
-  // populations of each input at that node (a BlockVectorType of all
-  // populations, or Moving{v}). out may be one of the inputs: each node is read
-  // before it is written. The nodes are independent (ivdep), so the compiler
-  // vectorizes the loop across them once op is inlined.
-  template <typename Op, NodalInput... In>
-    requires std::is_invocable_r_v<Populations, Op &, unsigned int, const PopulationsOf<In> &...>
-  void
-  nodal_map(BlockVectorType &out, Op &&op, const In &...in)
-  {
-    AssertDimension(out.n_blocks(), Q);
-    std::array<Number *, Q> O;
-    for (unsigned int a = 0; a < Q; ++a)
-      O[a] = out.block(a).begin();
-    const unsigned int n_nodes = out.block(0).locally_owned_size();
-    [&](const auto... views) { // local copies: their block pointers are loop invariant
-#pragma GCC ivdep
-      for (unsigned int i = 0; i < n_nodes; ++i)
-        {
-          const Populations fi = op(i, views[i]...);
-          for (unsigned int a = 0; a < Q; ++a)
-            O[a][i] = fi[a];
-        }
-    }(view(in)...);
-  }
-
-  // The velocity a node imposes on its moments: the fluid's own, or that of
-  // the wall it is on.
+  // What a node imposes on its moments: nothing, or the velocity of its wall.
   struct FluidNode
   {
     D2Q9::Moments
@@ -123,90 +64,41 @@ namespace lbfem
     D2Q9::Moments
     operator()(D2Q9::Moments m) const
     {
-      m.ux = ux;
-      m.uy = uy;
+      m.ux = u[0];
+      m.uy = u[1];
       return m;
     }
-    Number ux, uy;
+    Direction u;
   };
 
-  // Wall nodes and their velocities, from TestCase::wall_of and wall_velocity.
-  struct Walls
-  {
-    void
-    reinit(const std::vector<Point<2>> &node, const TestCase &tc)
-    {
-      std::vector<int> wall_of_node(node.size());
-      for (unsigned int i = 0; i < node.size(); ++i)
-        wall_of_node[i] = tc.wall_of(node[i]);
-      std::vector<std::array<Number, 2>> wall_velocity(tc.n_walls());
-      for (unsigned int w = 0; w < wall_velocity.size(); ++w)
-        wall_velocity[w] = tc.wall_velocity(w);
-      set(std::move(wall_of_node), std::move(wall_velocity));
-    }
-
-    // The wall index of every node (-1: interior) and the velocity of every wall.
-    void
-    set(std::vector<int> wall_of_node, std::vector<std::array<Number, 2>> wall_velocity)
-    {
-      of_node  = std::move(wall_of_node);
-      velocity = std::move(wall_velocity);
-      nodes.clear();
-      for (unsigned int i = 0; i < of_node.size(); ++i)
-        if (of_node[i] >= 0)
-          nodes.push_back(i);
-    }
-
-    // What wall node i imposes.
-    WallNode
-    wall(const unsigned int i) const
-    {
-      const auto [ux, uy] = velocity[of_node[i]];
-      return {ux, uy};
-    }
-
-    // What wall node k (of nodes) imposes.
-    WallNode
-    at(const unsigned int k) const
-    {
-      return wall(nodes[k]);
-    }
-
-    // Moments of node i, with the wall velocity on wall nodes (for output).
-    D2Q9::Moments
-    macroscopic(const unsigned int i, const Populations &fi) const
-    {
-      const auto m = D2Q9::moments(fi);
-      return of_node[i] < 0 ? m : wall(i)(m);
-    }
-
-    std::vector<int>                   of_node;  // -1: interior, else index into velocity
-    std::vector<std::array<Number, 2>> velocity; // per wall
-    std::vector<unsigned int>          nodes;    // the wall nodes
-  };
-
-  // out_i <- op(at_i, in_i...) at every locally owned node i, where at_i is
-  // what node i imposes on its moments (FluidNode or WallNode). The loop over
-  // all nodes, vectorized, is the fluid one; the wall nodes are computed
-  // before it from the inputs as they are (out may be one of them) and
-  // overwritten after it.
-  template <typename Op, NodalInput... In>
-    requires std::is_invocable_r_v<Populations, Op &, const FluidNode &, const PopulationsOf<In> &...> &&
-             std::is_invocable_r_v<Populations, Op &, const WallNode &, const PopulationsOf<In> &...>
+  // out_i <- op(impose_i, in_i...) at every locally owned node i, where impose_i
+  // is FluidNode or WallNode. The wall nodes are computed first, from the
+  // inputs as they are (out may be one of them); then all nodes as fluid
+  // nodes, vectorized; then the wall nodes are written over.
+  template <typename Op, unsigned int... n>
   void
-  nodal_map(BlockVectorType &out, const Walls &walls, Op &&op, const In &...in)
+  nodal_map(BlockVectorType &out, const Walls &walls, Op &&op, const Nodal<n>... in)
   {
     std::vector<Populations> at_wall(walls.nodes.size());
-    [&](const auto... views) {
-      for (unsigned int k = 0; k < at_wall.size(); ++k)
-        at_wall[k] = op(walls.at(k), views[walls.nodes[k]]...);
-    }(view(in)...);
+    for (unsigned int k = 0; k < at_wall.size(); ++k)
+      at_wall[k] = op(WallNode{walls.velocity[k]}, in[walls.nodes[k]]...);
 
-    nodal_map(out, [&](const unsigned int, const auto &...fi) { return op(FluidNode{}, fi...); }, in...);
+    AssertDimension(out.n_blocks(), Q);
+    std::array<Number *, Q> O;
+    for (unsigned int a = 0; a < Q; ++a)
+      O[a] = out.block(a).begin();
+    const unsigned int n_nodes = out.block(0).locally_owned_size();
+#pragma GCC ivdep
+    for (unsigned int i = 0; i < n_nodes; ++i)
+      {
+        const Populations fi = op(FluidNode{}, in[i]...);
+        for (unsigned int a = 0; a < Q; ++a)
+          O[a][i] = fi[a];
+      }
 
     for (unsigned int a = 0; a < Q; ++a)
       for (unsigned int k = 0; k < at_wall.size(); ++k)
-        out.block(a).local_element(walls.nodes[k]) = at_wall[k][a];
+        O[a][walls.nodes[k]] = at_wall[k][a];
   }
 
   // feq <- feq(f), nodal (Lee & Lin).
@@ -214,39 +106,42 @@ namespace lbfem
   compute_equilibrium(const BlockVectorType &f, BlockVectorType &feq, const Walls &walls)
   {
     nodal_map(
-      feq, walls, [](const auto &at, const Populations &fi) { return D2Q9::equilibrium(at(D2Q9::moments(fi))); }, f);
+      feq,
+      walls,
+      [](const auto &impose, const Populations &fi) { return D2Q9::equilibrium(impose(D2Q9::moments(fi))); },
+      Nodal<Q>(f));
   }
 
-  // Lee & Lin, with tau = dt/lambda and the streaming increments x = M^{-1} r of
-  // the moving populations (x_0 = 0): predictor (Eq. 17)
-  // (1 + tau) fhat = f + tau feq + x, corrector (Eq. 18)
-  // f^{n+1} = fhat + tau (feq(fhat) - feq(f^n)).
+  // Lee & Lin, with theta = dt/lambda and the streaming increments x = M^{-1} r
+  // of the moving populations (block a - 1 for population a): predictor
+  // (Eq. 17) (1 + theta) fhat = f + theta feq + x, corrector (Eq. 18)
+  // f^{n+1} = fhat + theta (feq(fhat) - feq(f^n)).
   inline void
   predictor_corrector(BlockVectorType       &f,
                       const BlockVectorType &feq,
-                      const Moving          &incr,
+                      const BlockVectorType &incr,
                       const Walls           &walls,
-                      const Number           tau)
+                      const Number           theta)
   {
-    const Number inv = 1. / (1. + tau);
+    const Number inv = 1. / (1. + theta);
     nodal_map(
       f,
       walls,
-      [&](const auto &at, const Populations &fi, const Populations &feqi, const Populations &x) {
+      [&](const auto &impose, const Populations &fi, const Populations &feqi, const std::array<Number, n_moving> &x) {
         Populations fhat;
-        fhat[0] = inv * (fi[0] + tau * feqi[0]);
+        fhat[0] = inv * (fi[0] + theta * feqi[0]);
         for (unsigned int a = 1; a < Q; ++a)
-          fhat[a] = inv * (fi[a] + tau * feqi[a] + x[a]);
+          fhat[a] = inv * (fi[a] + theta * feqi[a] + x[a - 1]);
 
-        const auto  eq_hat = D2Q9::equilibrium(at(D2Q9::moments(fhat)));
+        const auto  eq_hat = D2Q9::equilibrium(impose(D2Q9::moments(fhat)));
         Populations out;
         for (unsigned int a = 0; a < Q; ++a)
-          out[a] = fhat[a] + tau * (eq_hat[a] - feqi[a]);
+          out[a] = fhat[a] + theta * (eq_hat[a] - feqi[a]);
         return out;
       },
-      f,
-      feq,
-      incr);
+      Nodal<Q>(f),
+      Nodal<Q>(feq),
+      Nodal<n_moving>(incr));
   }
 
   // BGK collision of the transformed populations g (Bardow et al.),
@@ -260,15 +155,15 @@ namespace lbfem
     nodal_map(
       g,
       walls,
-      [omega](const auto &at, const Populations &gi) {
+      [omega](const auto &impose, const Populations &gi) {
         const auto  m          = D2Q9::moments(gi);
         const auto  geq        = D2Q9::equilibrium(m);
-        const auto  geq_target = D2Q9::equilibrium(at(m)); // = geq on fluid nodes
+        const auto  geq_target = D2Q9::equilibrium(impose(m)); // = geq on fluid nodes
         Populations out;
         for (unsigned int a = 0; a < Q; ++a)
           out[a] = geq_target[a] + (1. - omega) * (gi[a] - geq[a]);
         return out;
       },
-      g);
+      Nodal<Q>(g));
   }
 } // namespace lbfem
